@@ -127,6 +127,9 @@ let draftIngredients = [];
 let aiPasteOpen = false;
 let aiSuggestions = null;
 let aiError = '';
+let photoPasteOpen = false;
+let photoItems = null;
+let photoError = '';
 let householdCode = localStorage.getItem(HOUSEHOLD_LS_KEY) || '';
 const receivedKeys = new Set();
 
@@ -261,6 +264,52 @@ function buildAiPrompt(){
     'Schlage 3 unterschiedliche, alltagstaugliche Gerichte vor. Jedes Gericht soll überwiegend aus den vorhandenen Zutaten bestehen; ein bis zwei zusätzliche Grundzutaten (Gewürze, Öl, Salz) sind erlaubt.\n\n' +
     'Antworte AUSSCHLIESSLICH mit einem JSON-Array in exakt diesem Format, ohne Markdown-Codeblock und ohne Text davor oder danach:\n' +
     '[{"name": "Gerichtname", "tags": ["nur Werte aus dieser Liste: ' + TAGS.join(', ') + '"], "ingredients": [{"name": "Zutat", "amount": "200", "unit": "g"}], "notes": "Zubereitung in maximal 3 Sätzen"}]';
+}
+
+// ---------- Foto-Erfassung (Copy-Paste über die Claude-App) ----------
+
+function buildPhotoPrompt(){
+  return 'Du hilfst beim Erfassen eines Lebensmitteleinkaufs für eine deutschsprachige Küchenvorrat-App.\n\n' +
+    'Auf dem Foto, das ich dir in dieser Nachricht anhänge, sind eingekaufte Lebensmittel zu sehen. ' +
+    'Erkenne alle eindeutig sichtbaren Produkte. Fasse mehrere gleiche Produkte zu einem Eintrag mit passender Menge zusammen. ' +
+    'Rate nichts, was du nicht erkennen kannst.\n\n' +
+    'Gib für jedes Produkt an:\n' +
+    '- name: kurze deutsche Bezeichnung (z. B. "Vollmilch", "Hähnchenbrust", "Tiefkühl-Erbsen")\n' +
+    '- amount: Anzahl oder Menge falls erkennbar, sonst "1"\n' +
+    '- unit: Einheit falls erkennbar (g, kg, ml, l, Stück, Packung, Dose), sonst ""\n' +
+    '- location: typischer Lagerort, GENAU einer aus dieser Liste: ' + LOCATIONS.join(', ') + '\n' +
+    '- category: GENAU eine aus dieser Liste: ' + CATEGORIES.join(', ') + '\n\n' +
+    'Ordne den Lagerort nach üblicher Aufbewahrung zu: Tiefkühlware in die Gefriertruhe; ' +
+    'Frischware, Fleisch, Fisch und Milchprodukte in den Kühlschrank; haltbare Ware, Konserven und Trockenware in den Vorratsschrank.\n\n' +
+    'Antworte AUSSCHLIESSLICH mit einem JSON-Array in exakt diesem Format, ohne Markdown-Codeblock und ohne Text davor oder danach:\n' +
+    '[{"name": "Vollmilch", "amount": "1", "unit": "l", "location": "Kühlschrank", "category": "Milchprodukte"}]';
+}
+
+function parsePhotoItems(raw){
+  const clean = raw.replace(/```json|```/g, '').trim();
+  let jsonText = clean;
+  const start = clean.indexOf('[');
+  const end = clean.lastIndexOf(']');
+  if(start >= 0 && end > start){
+    jsonText = clean.slice(start, end + 1);
+  } else {
+    const os = clean.indexOf('{'); const oe = clean.lastIndexOf('}');
+    if(os >= 0 && oe > os) jsonText = '[' + clean.slice(os, oe + 1) + ']';
+  }
+  const parsed = JSON.parse(jsonText);
+  const arr = Array.isArray(parsed) ? parsed : [parsed];
+  const result = arr
+    .filter(r => r && typeof r.name === 'string' && r.name.trim())
+    .map(r => ({
+      id: uid(),
+      name: String(r.name).trim(),
+      amount: String(r.amount || '1').trim() || '1',
+      unit: String(r.unit || '').trim(),
+      location: LOCATIONS.includes(r.location) ? r.location : 'Vorratsschrank',
+      category: CATEGORIES.includes(r.category) ? r.category : 'Sonstiges'
+    }));
+  if(result.length === 0) throw new Error('keine Produkte erkannt');
+  return result;
 }
 
 function parseAiRecipes(raw){
@@ -407,7 +456,56 @@ function renderVorrat(){
         <button class="btn small" data-action="bulk-add">Übernehmen</button>
       </div>
     </div>
+    <div class="card">
+      <h2>Einkauf per Foto erfassen</h2>
+      ${renderPhotoBox()}
+    </div>
     <div class="card"><h2>Was wir gerade da haben</h2><div class="loc-grid">${blocks}</div></div>
+  `;
+}
+
+function renderPhotoBox(){
+  let previewHtml = '';
+  if(photoItems && photoItems.length){
+    const rows = photoItems.map((p, idx) => `
+      <div class="photo-item" data-idx="${idx}">
+        <span class="photo-item-name">${escapeHtml(p.name)}${p.amount ? ' – ' + escapeHtml(String(p.amount)) + (p.unit ? ' ' + escapeHtml(p.unit) : '') : ''}</span>
+        <select data-action="photo-item-loc" data-idx="${idx}">
+          ${LOCATIONS.map(l => `<option value="${escapeHtml(l)}" ${l===p.location?'selected':''}>${escapeHtml(l)}</option>`).join('')}
+        </select>
+        <select data-action="photo-item-cat" data-idx="${idx}">
+          ${CATEGORIES.map(c => `<option value="${escapeHtml(c)}" ${c===p.category?'selected':''}>${escapeHtml(c)}</option>`).join('')}
+        </select>
+        <button class="item-actions" data-action="photo-item-remove" data-idx="${idx}" title="entfernen">×</button>
+      </div>
+    `).join('');
+    previewHtml = `
+      <div class="photo-preview">
+        <div class="status-line" style="margin-bottom:6px;">${photoItems.length} Produkt${photoItems.length===1?'':'e'} erkannt. Lagerort und Kategorie kannst du vor dem Übernehmen noch anpassen.</div>
+        ${rows}
+        <div class="recipe-controls" style="margin-top:12px;">
+          <button class="btn small" data-action="import-photo-items">In den Vorrat übernehmen</button>
+          <button class="btn small secondary" data-action="discard-photo-items">Verwerfen</button>
+        </div>
+      </div>
+    `;
+  }
+  return `
+    <div class="ai-box">
+      <div class="status-line" style="margin-bottom:8px;">So geht's: 1) Prompt kopieren. 2) In der Claude-App einfügen und das Foto deines Einkaufs anhängen (Produkte gut sichtbar). 3) Claudes komplette Antwort kopieren und hier einfügen – die erkannten Artikel landen dann im Vorrat.</div>
+      <div class="recipe-controls">
+        <button class="btn small" data-action="copy-photo-prompt">Foto-Prompt kopieren</button>
+        <button class="btn small secondary" data-action="toggle-photo-paste">${photoPasteOpen ? 'Eingabefeld verbergen' : 'Antwort einfügen'}</button>
+      </div>
+      ${photoPasteOpen ? `
+        <textarea id="photo-paste-area" rows="5" style="margin-top:10px;" placeholder="Hier die komplette Antwort von Claude einfügen ..."></textarea>
+        <div class="recipe-controls" style="margin-top:8px;">
+          <button class="btn small" data-action="import-photo-paste">Produkte erkennen</button>
+        </div>
+      ` : ''}
+      ${photoError ? `<div class="ai-error">${escapeHtml(photoError)}</div>` : ''}
+      ${previewHtml}
+    </div>
   `;
 }
 
@@ -803,20 +901,48 @@ async function importJson(file){
   render();
 }
 
-async function copyAiPrompt(){
-  const prompt = buildAiPrompt();
+async function copyToClipboard(text){
   try{
-    await navigator.clipboard.writeText(prompt);
-    statusMsg = 'Prompt kopiert – jetzt in der Claude-App einfügen.';
+    await navigator.clipboard.writeText(text);
+    return true;
   }catch(e){
     const ta = document.createElement('textarea');
-    ta.value = prompt;
+    ta.value = text;
     document.body.appendChild(ta);
     ta.select();
-    try{ document.execCommand('copy'); statusMsg = 'Prompt kopiert – jetzt in der Claude-App einfügen.'; }
-    catch(e2){ statusMsg = 'Kopieren nicht möglich – bitte Text manuell markieren.'; }
+    let ok = false;
+    try{ ok = document.execCommand('copy'); }catch(e2){ ok = false; }
     ta.remove();
+    return ok;
   }
+}
+
+async function copyAiPrompt(){
+  const ok = await copyToClipboard(buildAiPrompt());
+  statusMsg = ok ? 'Prompt kopiert – jetzt in der Claude-App einfügen.' : 'Kopieren nicht möglich – bitte Text manuell markieren.';
+  render();
+}
+
+async function copyPhotoPrompt(){
+  const ok = await copyToClipboard(buildPhotoPrompt());
+  statusMsg = ok
+    ? 'Foto-Prompt kopiert – in der Claude-App einfügen und das Einkaufsfoto anhängen.'
+    : 'Kopieren nicht möglich – bitte Text manuell markieren.';
+  render();
+}
+
+// Erkannte Produkte in den Vorrat übernehmen. Rein additiv: legt neue Artikel an,
+// bestehende Vorräte bleiben unangetastet (Datensicherheits-Prinzip).
+async function importPhotoItems(){
+  if(!photoItems || !photoItems.length) return;
+  const toAdd = photoItems.map(p => ({
+    id: uid(), name: p.name, amount: p.amount || '1', unit: p.unit || '', location: p.location, category: p.category
+  }));
+  inventory = await mutateShared('inventory', inventory, (inv) => { toAdd.forEach(it => inv.push(it)); return inv; });
+  const n = toAdd.length;
+  photoItems = null;
+  photoError = '';
+  statusMsg = n + (n === 1 ? ' Artikel' : ' Artikel') + ' aus dem Foto in den Vorrat übernommen.';
   render();
 }
 
@@ -938,6 +1064,31 @@ function bindGlobalEvents(){
         render(); break;
       }
       case 'discard-ai-suggestions': aiSuggestions = null; aiError=''; render(); break;
+      case 'copy-photo-prompt': await copyPhotoPrompt(); break;
+      case 'toggle-photo-paste': photoPasteOpen = !photoPasteOpen; photoError=''; render(); break;
+      case 'import-photo-paste': {
+        const ta = document.getElementById('photo-paste-area');
+        if(!ta || !ta.value.trim()) break;
+        try{
+          photoItems = parsePhotoItems(ta.value);
+          photoError = '';
+          photoPasteOpen = false;
+        }catch(err){
+          console.error(err);
+          photoError = 'Antwort konnte nicht gelesen werden. Bitte die komplette Claude-Antwort (mit den eckigen Klammern) einfügen.';
+        }
+        render(); break;
+      }
+      case 'photo-item-remove': {
+        const idx = parseInt(el.dataset.idx);
+        if(photoItems){
+          photoItems = photoItems.filter((_, i) => i !== idx);
+          if(photoItems.length === 0) photoItems = null;
+        }
+        render(); break;
+      }
+      case 'import-photo-items': await importPhotoItems(); break;
+      case 'discard-photo-items': photoItems = null; photoError=''; render(); break;
       case 'export-json': exportJson(); break;
       case 'import-json': document.getElementById('import-file').click(); break;
       case 'change-household': {
@@ -976,6 +1127,14 @@ function bindGlobalEvents(){
         return list;
       });
       render();
+    }
+    if(el.dataset.action === 'photo-item-loc' && photoItems){
+      const idx = parseInt(el.dataset.idx);
+      if(photoItems[idx]) photoItems[idx].location = el.value;
+    }
+    if(el.dataset.action === 'photo-item-cat' && photoItems){
+      const idx = parseInt(el.dataset.idx);
+      if(photoItems[idx]) photoItems[idx].category = el.value;
     }
   });
 
