@@ -8,7 +8,7 @@ const LOCATIONS = ['Gefriertruhe', 'Vorratsschrank', 'Kühlschrank'];
 const CATEGORIES = ['Fleisch & Fisch','Gemüse & Obst','Milchprodukte','Fertiggerichte','Grundnahrungsmittel','Konserven','Gewürze & Saucen','Backwaren','Getränke','Sonstiges'];
 const TAGS = ['proteinreich','fettarm','ausgewogen','vegan','fleischlastig','mit Gemüse','ohne Gemüse'];
 const DAYS = ['Montag','Dienstag','Mittwoch','Donnerstag','Freitag','Samstag','Sonntag'];
-const KNOWN_UNITS = ['g','kg','mg','ml','l','tl','el','stk','stück','dose','dosen','packung','päckchen','pck','prise','bund','zehe','zehen','stange','stangen','scheibe','scheiben','becher','glas','gläser','flasche','flaschen','tasse','tassen','kopf','köpfe','tüte','tüten','msp','messerspitze','esslöffel','teelöffel','liter','gramm','kilogramm','milliliter'];
+const KNOWN_UNITS = ['g','kg','mg','ml','l','tl','el','stk','stück','dose','dosen','packung','päckchen','pck','prise','bund','zehe','zehen','stange','stangen','scheibe','scheiben','becher','glas','gläser','flasche','flaschen','tasse','tassen','kopf','köpfe','tüte','tüten','msp','messerspitze','esslöffel','teelöffel','liter','gramm','kilogramm','milliliter','blatt','blätter','zweig','zweige','handvoll','portion','portionen','würfel','riegel','tropfen'];
 const HOUSEHOLD_LS_KEY = 'vorrat-household';
 
 const STARTER_RECIPES = [
@@ -241,28 +241,26 @@ function availabilityBadge(recipe){
   return {cls:'partial', text: have + ' von ' + total + ' vorrätig'};
 }
 
-// Zerlegt eine Zutaten-/Artikelzeile in Bezeichnung, Menge und Einheit. Erkennt u. a.
-// Ziffern, Dezimalzahlen (1,5 / 1.5), Brüche (1/2) und Unicode-Brüche (½) als Menge –
-// auch wenn die Einheit direkt anklebt ("200g Mehl") oder unbekannt/leer ist.
+// Zerlegt eine Zutaten-/Artikelzeile in Bezeichnung, Menge und Einheit. Erkennt die
+// Menge sowohl am Anfang ("200 g Mehl", "200g Mehl") als auch am Ende ("Mehl 200 g",
+// "Mehl 200g", "Karotten 2"). Unterstützt Ziffern, Dezimalzahlen (1,5 / 1.5),
+// Brüche (1/2) und Unicode-Brüche (½). Die Einheit darf direkt ankleben.
 const FRACTION_MAP = { '½':'0.5','¼':'0.25','¾':'0.75','⅓':'1/3','⅔':'2/3','⅛':'0.125','⅜':'0.375' };
+const AMOUNT_RE = '(?:[½¼¾⅓⅔⅛⅜]|\\d+(?:[.,]\\d+)?(?:\\s*\\/\\s*\\d+)?)';
+
+function normalizeAmount(a){
+  return FRACTION_MAP[a] || a.replace(/\s+/g,'');
+}
 
 function parseIngredientLine(line){
   const raw = line.trim();
   if(!raw) return null;
-  let rest = raw, amount = '', unit = '';
 
-  const uni = rest.match(/^([½¼¾⅓⅔⅛⅜])\s*/);
-  const num = rest.match(/^(\d+(?:[.,]\d+)?(?:\s*\/\s*\d+)?)\s*/);
-  if(uni){
-    amount = FRACTION_MAP[uni[1]] || '';
-    rest = rest.slice(uni[0].length);
-  } else if(num){
-    amount = num[1].replace(/\s+/g,'');
-    rest = rest.slice(num[0].length);
-  }
-
-  if(amount){
-    // Direkt folgende Einheit erkennen – auch ohne Leerzeichen (z. B. "200g").
+  // 1) Menge am Anfang der Zeile.
+  const lead = raw.match(new RegExp('^(' + AMOUNT_RE + ')\\s*(.*)$'));
+  if(lead){
+    let rest = lead[2];
+    let unit = '';
     const um = rest.match(/^([A-Za-zÄÖÜäöüß.]+)/);
     if(um){
       const cand = um[1].toLowerCase().replace(/\.+$/,'');
@@ -271,11 +269,24 @@ function parseIngredientLine(line){
         rest = rest.slice(um[1].length).replace(/^[\s.]+/,'');
       }
     }
+    const name = rest.trim();
+    if(name) return { name, amount: normalizeAmount(lead[1]), unit };
+    // Nur Zahl/Einheit ohne Namen – dann lieber den Rohtext als Namen behalten.
+    return { name: raw, amount: '', unit: '' };
   }
 
-  const name = rest.trim();
-  if(!name) return { name: raw, amount: '', unit: '' };
-  return { name, amount, unit };
+  // 2) Menge am Ende der Zeile ("Mehl 200 g", "Mehl 200g", "Karotten 2").
+  const trail = raw.match(new RegExp('^(.*\\S)\\s+(' + AMOUNT_RE + ')\\s*([A-Za-zÄÖÜäöüß.]*)$'));
+  if(trail){
+    const unitRaw = trail[3] || '';
+    const cand = unitRaw.toLowerCase().replace(/\.+$/,'');
+    if(unitRaw === '' || KNOWN_UNITS.includes(cand)){
+      return { name: trail[1].trim(), amount: normalizeAmount(trail[2]), unit: unitRaw ? unitRaw.replace(/\.+$/,'') : '' };
+    }
+  }
+
+  // 3) Keine Menge erkennbar.
+  return { name: raw, amount: '', unit: '' };
 }
 
 function itemCategory(item){
@@ -622,7 +633,7 @@ function renderRezepte(){
     <div class="card">
       <h3>Neues Rezept anlegen</h3>
       <div class="paste-box">
-        <div class="paste-hint">Schnell einfügen: erste Zeile der Name des Gerichts, jede weitere Zeile eine Zutat (z. B. „200 g Linsen" oder einfach „Zwiebel"). Danach unten Tags wählen und speichern.</div>
+        <div class="paste-hint">Eine Zutat pro Zeile – die Menge darf vorne oder hinten stehen (z. B. „200 g Linsen", „Linsen 200 g" oder einfach „Zwiebel"). Den Gerichtsnamen oben eintragen; ist das Feld leer, wird die erste Zeile als Name genommen. Danach unten Tags wählen und speichern.</div>
         <textarea id="paste-area" rows="4" placeholder="Linsensuppe&#10;200 g rote Linsen&#10;2 Karotten&#10;1 Zwiebel"></textarea>
         <div style="margin-top:8px;"><button class="btn small secondary" data-action="parse-paste">In Formular übernehmen</button></div>
       </div>
@@ -1270,8 +1281,14 @@ function bindGlobalEvents(){
         const raw = document.getElementById('paste-area').value;
         const lines = raw.split('\n').map(l=>l.trim()).filter(Boolean);
         if(lines.length === 0) break;
-        draftName = lines[0];
-        draftIngredients = lines.slice(1).map(parseIngredientLine).filter(Boolean);
+        if(draftName.trim()){
+          // Name steht schon oben -> alle Zeilen als Zutaten behandeln, Name nicht überschreiben.
+          draftIngredients = lines.map(parseIngredientLine).filter(Boolean);
+        } else {
+          // Kein Name gesetzt -> erste Zeile ist der Gerichtsname, Rest sind Zutaten.
+          draftName = lines[0];
+          draftIngredients = lines.slice(1).map(parseIngredientLine).filter(Boolean);
+        }
         render(); break;
       }
       case 'save-recipe': await saveRecipe(); break;
