@@ -1037,8 +1037,39 @@ function normalizeSpokenLine(line){
   return words.join(' ').trim();
 }
 
+// Erkennt, ob ein Wort eine Mengenangabe ist (Ziffer oder Zahlwort) – dient als
+// Startsignal für einen neuen Artikel innerhalb eines pausenlosen Satzes.
+function isQuantityToken(t){
+  const lw = t.toLowerCase().replace(/[.,;:!?]+$/,'');
+  return /^\d+([.,]\d+)?$/.test(lw) || Object.prototype.hasOwnProperty.call(NUM_WORDS, lw);
+}
+
+// Trennt eine pausenlose Phrase vor jeder Mengenangabe auf, z. B.
+// „zwei Kilo Kartoffeln drei Dosen Kichererbsen" -> ["zwei Kilo Kartoffeln", "drei Dosen Kichererbsen"].
+function splitBeforeQuantities(phrase){
+  const tokens = phrase.trim().split(/\s+/).filter(Boolean);
+  const lines = [];
+  let cur = [];
+  tokens.forEach((t, i) => {
+    if(i > 0 && cur.length && isQuantityToken(t)){
+      lines.push(cur.join(' '));
+      cur = [t];
+    } else {
+      cur.push(t);
+    }
+  });
+  if(cur.length) lines.push(cur.join(' '));
+  return lines;
+}
+
+// Wandelt den erkannten Sprachtext in einzelne Artikelzeilen um. Getrennt wird an
+// drei Signalen: Sprechpausen (Zeilenumbrüche aus den Erkennungs-Abschnitten),
+// Satzzeichen/Bindewörter und Mengenangaben mitten im Satz.
 function spokenToLines(text){
-  return text.split(/\s*,\s*|\s+und\s+/i).map(s => s.trim()).filter(Boolean).map(normalizeSpokenLine).filter(Boolean);
+  const coarse = text.split(/\s*[\n,;]\s*|\s+und\s+|\s+sowie\s+/i).map(s => s.trim()).filter(Boolean);
+  const out = [];
+  coarse.forEach(part => splitBeforeQuantities(part).forEach(l => { if(l.trim()) out.push(l.trim()); }));
+  return out.map(normalizeSpokenLine).filter(Boolean);
 }
 
 function commitVoice(){
@@ -1069,7 +1100,7 @@ function startVoice(){
       let interim = '';
       for(let i = ev.resultIndex; i < ev.results.length; i++){
         const res = ev.results[i];
-        if(res.isFinal) recognition._finalText += res[0].transcript + ' ';
+        if(res.isFinal) recognition._finalText += res[0].transcript.trim() + '\n';
         else interim += res[0].transcript;
       }
       const el = document.getElementById('voice-interim');
