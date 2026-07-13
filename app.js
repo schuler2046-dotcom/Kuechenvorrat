@@ -131,6 +131,7 @@ let photoPasteOpen = false;
 let photoItems = null;
 let photoError = '';
 let bulkDraft = '';
+let editingItemId = null;
 let photoFile = null, photoPreviewUrl = '';
 let voiceListening = false, voiceError = '';
 let recognition = null;
@@ -408,6 +409,48 @@ function renderHouseholdScreen(){
   `;
 }
 
+// Eine Vorratszeile: normal (großer Stepper + Bearbeiten) oder als Bearbeiten-Formular.
+function renderItemRow(i){
+  if(i.id === editingItemId) return renderItemEdit(i);
+  return `
+    <div class="item-row" data-item-id="${i.id}">
+      <span class="item-name">${escapeHtml(i.name)}</span>
+      <span class="item-stepper">
+        <button class="step-btn" data-action="dec-item" aria-label="Menge verringern">−</button>
+        <span class="item-qty">${escapeHtml(String(i.amount))}${i.unit ? ' '+escapeHtml(i.unit) : ''}</span>
+        <button class="step-btn" data-action="inc-item" aria-label="Menge erhöhen">+</button>
+      </span>
+      <button class="edit-btn" data-action="edit-item" aria-label="Artikel bearbeiten" title="Bearbeiten: Ort, Kategorie, löschen">✎</button>
+    </div>
+  `;
+}
+
+// Inline-Formular zum Ändern von Name, Menge, Einheit, Lagerort und Kategorie eines Artikels.
+function renderItemEdit(i){
+  const locOpts = LOCATIONS.map(l => `<option value="${escapeHtml(l)}" ${l===i.location?'selected':''}>${escapeHtml(l)}</option>`).join('');
+  const catOpts = CATEGORIES.map(c => `<option value="${escapeHtml(c)}" ${c===itemCategory(i)?'selected':''}>${escapeHtml(c)}</option>`).join('');
+  return `
+    <div class="item-row editing" data-item-id="${i.id}">
+      <div class="item-edit">
+        <input type="text" class="edit-name" value="${escapeHtml(i.name)}" placeholder="Artikel">
+        <div class="edit-line">
+          <input type="number" class="qty-input edit-amount" value="${escapeHtml(String(i.amount))}" min="0" step="any" placeholder="Menge">
+          <input type="text" class="unit-input edit-unit" value="${escapeHtml(i.unit||'')}" placeholder="Einheit">
+        </div>
+        <div class="edit-line">
+          <label class="edit-field"><span>Lagerort</span><select class="edit-loc">${locOpts}</select></label>
+          <label class="edit-field"><span>Kategorie</span><select class="edit-cat">${catOpts}</select></label>
+        </div>
+        <div class="edit-actions">
+          <button class="btn small" data-action="save-item-edit">Speichern</button>
+          <button class="btn small secondary" data-action="cancel-item-edit">Abbrechen</button>
+          <button class="btn small danger" data-action="delete-item-edit">Löschen</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
 function renderVorrat(){
   const blocks = LOCATIONS.map(loc => {
     const items = inventory.filter(i => i.location === loc);
@@ -417,17 +460,7 @@ function renderVorrat(){
       inner = groups.map(cat => {
         const collapsed = collapsedCats.has(loc + '|' + cat);
         const catItems = items.filter(i => itemCategory(i) === cat);
-        const rows = collapsed ? '' : catItems.map(i => `
-          <div class="item-row" data-item-id="${i.id}">
-            <span class="item-name">${escapeHtml(i.name)}</span>
-            <span class="item-qty">${escapeHtml(String(i.amount))}${i.unit ? ' '+escapeHtml(i.unit) : ''}</span>
-            <span class="item-actions">
-              <button data-action="dec-item" title="weniger">−</button>
-              <button data-action="inc-item" title="mehr">+</button>
-              <button data-action="del-item" title="entfernen">×</button>
-            </span>
-          </div>
-        `).join('');
+        const rows = collapsed ? '' : catItems.map(renderItemRow).join('');
         return `
           <div class="cat-head" data-action="toggle-cat" data-loc="${loc}" data-cat="${escapeHtml(cat)}">
             <span>${escapeHtml(cat)} (${catItems.length})</span><span class="cat-toggle">${collapsed ? '▸' : '▾'}</span>
@@ -824,6 +857,35 @@ async function changeItem(id, action){
   render();
 }
 
+// Artikel-Bearbeitung übernehmen: aktualisiert nur den einen Datensatz (Read-before-write
+// über mutateShared), inklusive Lagerort- und Kategorie-Wechsel.
+async function saveItemEdit(id){
+  const row = document.querySelector(`.item-row.editing[data-item-id="${id}"]`);
+  if(!row) return;
+  const nameEl = row.querySelector('.edit-name');
+  const name = nameEl.value.trim();
+  if(!name){ nameEl.focus(); return; }
+  const amount = row.querySelector('.edit-amount').value.trim();
+  const unit = row.querySelector('.edit-unit').value.trim();
+  const location = row.querySelector('.edit-loc').value;
+  const category = row.querySelector('.edit-cat').value;
+  inventory = await mutateShared('inventory', inventory, (inv) => {
+    const it = inv.find(x => x.id === id);
+    if(it){ it.name = name; it.amount = amount || '1'; it.unit = unit; it.location = location; it.category = category; }
+    return inv;
+  });
+  editingItemId = null;
+  statusMsg = 'Artikel aktualisiert.';
+  render();
+}
+
+async function deleteItemEdit(id){
+  if(!confirm('Diesen Artikel wirklich aus dem Vorrat löschen?')) return;
+  inventory = await mutateShared('inventory', inventory, (inv) => inv.filter(x => x.id !== id));
+  editingItemId = null;
+  render();
+}
+
 async function saveRecipe(){
   const nameEl = document.getElementById('new-recipe-name');
   const name = nameEl.value.trim();
@@ -1151,6 +1213,22 @@ function bindGlobalEvents(){
       case 'inc-item': case 'dec-item': case 'del-item': {
         const rowEl = el.closest('.item-row');
         if(rowEl) await changeItem(rowEl.dataset.itemId, action);
+        break;
+      }
+      case 'edit-item': {
+        const rowEl = el.closest('.item-row');
+        if(rowEl){ editingItemId = rowEl.dataset.itemId; render(); }
+        break;
+      }
+      case 'save-item-edit': {
+        const rowEl = el.closest('.item-row');
+        if(rowEl) await saveItemEdit(rowEl.dataset.itemId);
+        break;
+      }
+      case 'cancel-item-edit': editingItemId = null; render(); break;
+      case 'delete-item-edit': {
+        const rowEl = el.closest('.item-row');
+        if(rowEl) await deleteItemEdit(rowEl.dataset.itemId);
         break;
       }
       case 'toggle-filter-tag': {
