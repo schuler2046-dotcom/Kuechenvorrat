@@ -130,8 +130,19 @@ let aiError = '';
 let photoPasteOpen = false;
 let photoItems = null;
 let photoError = '';
+let bulkDraft = '';
+let photoFile = null, photoPreviewUrl = '';
+let voiceListening = false, voiceError = '';
+let recognition = null;
 let householdCode = localStorage.getItem(HOUSEHOLD_LS_KEY) || '';
 const receivedKeys = new Set();
+
+// Feature-Erkennung: Spracherkennung (Web Speech API) und Datei-Teilen (Web Share API).
+const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+const voiceSupported = !!SpeechRec;
+function shareFilesSupported(){
+  return !!(navigator.canShare && navigator.share && photoFile && navigator.canShare({ files: [photoFile] }));
+}
 
 function uid(){ return 'id-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,8); }
 
@@ -448,8 +459,13 @@ function renderVorrat(){
   return `
     <div class="card">
       <h2>Einkauf schnell erfassen</h2>
-      <div class="status-line" style="margin-bottom:8px;">Eine Zeile pro Artikel, z. B. „2 kg Kartoffeln" oder einfach „Milch". Zum Diktieren das Mikrofon-Symbol der Handy-Tastatur nutzen.</div>
-      <textarea id="bulk-add-text" rows="3" placeholder="2 kg Kartoffeln&#10;3 Dosen Kichererbsen&#10;Milch"></textarea>
+      <div class="status-line" style="margin-bottom:8px;">Eine Zeile pro Artikel, z. B. „2 kg Kartoffeln" oder einfach „Milch". Per Sprache diktieren oder einfach tippen.</div>
+      <div class="capture-row">
+        <button class="btn small ${voiceListening ? 'secondary' : ''}" data-action="toggle-voice">${voiceListening ? '■ Aufnahme stoppen' : '🎤 Einkauf sprechen'}</button>
+        <span class="voice-interim ${voiceListening ? 'live' : ''}" id="voice-interim">${voiceListening ? 'Höre zu … sprich z. B. „zwei Kilo Kartoffeln, drei Dosen Kichererbsen, Milch"' : ''}</span>
+      </div>
+      ${voiceError ? `<div class="ai-error">${escapeHtml(voiceError)}</div>` : ''}
+      <textarea id="bulk-add-text" rows="3" placeholder="2 kg Kartoffeln&#10;3 Dosen Kichererbsen&#10;Milch">${escapeHtml(bulkDraft)}</textarea>
       <div class="add-row" style="margin-top:8px;">
         <select id="bulk-add-loc">${LOCATIONS.map(l => `<option value="${l}">${l}</option>`).join('')}</select>
         <select id="bulk-add-cat">${CATEGORIES.map(c => `<option value="${escapeHtml(c)}" ${c==='Sonstiges'?'selected':''}>${escapeHtml(c)}</option>`).join('')}</select>
@@ -490,12 +506,26 @@ function renderPhotoBox(){
       </div>
     `;
   }
+  const shotHtml = photoPreviewUrl ? `
+    <div class="photo-shot">
+      <img src="${photoPreviewUrl}" alt="Aufgenommenes Einkaufsfoto">
+      <div class="recipe-controls" style="margin-top:0;">
+        <button class="btn small" data-action="send-photo">${shareFilesSupported() ? '➜ Foto & Prompt an Claude senden' : 'Prompt kopieren'}</button>
+        <button class="btn small secondary" data-action="clear-photo">Foto verwerfen</button>
+      </div>
+    </div>
+  ` : '';
   return `
     <div class="ai-box">
-      <div class="status-line" style="margin-bottom:8px;">So geht's: 1) Prompt kopieren. 2) In der Claude-App einfügen und das Foto deines Einkaufs anhängen (Produkte gut sichtbar). 3) Claudes komplette Antwort kopieren und hier einfügen – die erkannten Artikel landen dann im Vorrat.</div>
-      <div class="recipe-controls">
-        <button class="btn small" data-action="copy-photo-prompt">Foto-Prompt kopieren</button>
-        <button class="btn small secondary" data-action="toggle-photo-paste">${photoPasteOpen ? 'Eingabefeld verbergen' : 'Antwort einfügen'}</button>
+      <div class="status-line" style="margin-bottom:8px;">So geht's: 1) Foto vom Einkauf aufnehmen. 2) „Foto & Prompt an Claude senden" – beides geht zusammen an deinen Claude-Account (der Prompt liegt zusätzlich in der Zwischenablage). 3) Claudes komplette Antwort hier einfügen – die erkannten Artikel landen im Vorrat.</div>
+      <div class="capture-row">
+        <button class="btn small" data-action="take-photo">📷 Foto aufnehmen</button>
+        <button class="btn small secondary" data-action="copy-photo-prompt">Nur Prompt kopieren</button>
+      </div>
+      <input type="file" id="photo-file-input" accept="image/*" capture="environment" style="display:none;">
+      ${shotHtml}
+      <div class="recipe-controls" style="margin-top:10px;">
+        <button class="btn small secondary" data-action="toggle-photo-paste">${photoPasteOpen ? 'Eingabefeld verbergen' : 'Antwort von Claude einfügen'}</button>
       </div>
       ${photoPasteOpen ? `
         <textarea id="photo-paste-area" rows="5" style="margin-top:10px;" placeholder="Hier die komplette Antwort von Claude einfügen ..."></textarea>
@@ -769,12 +799,14 @@ async function bulkAdd(){
   const ta = document.getElementById('bulk-add-text');
   const loc = document.getElementById('bulk-add-loc').value;
   const cat = document.getElementById('bulk-add-cat').value;
-  const lines = ta.value.split('\n').map(l=>l.trim()).filter(Boolean);
+  const lines = (ta ? ta.value : bulkDraft).split('\n').map(l=>l.trim()).filter(Boolean);
   if(!lines.length) return;
   const newItems = lines.map(parseIngredientLine).filter(Boolean).map(p => ({
     id: uid(), name: p.name, amount: p.amount || '1', unit: p.unit || '', location: loc, category: cat
   }));
   inventory = await mutateShared('inventory', inventory, (inv) => { newItems.forEach(it => inv.push(it)); return inv; });
+  bulkDraft = '';
+  statusMsg = newItems.length + (newItems.length === 1 ? ' Artikel' : ' Artikel') + ' hinzugefügt.';
   render();
 }
 
@@ -942,8 +974,128 @@ async function importPhotoItems(){
   const n = toAdd.length;
   photoItems = null;
   photoError = '';
+  if(photoPreviewUrl){ URL.revokeObjectURL(photoPreviewUrl); }
+  photoFile = null;
+  photoPreviewUrl = '';
   statusMsg = n + (n === 1 ? ' Artikel' : ' Artikel') + ' aus dem Foto in den Vorrat übernommen.';
   render();
+}
+
+// ---------- Foto-Aufnahme direkt in der App ----------
+
+function handlePhotoSelected(file){
+  if(!file) return;
+  if(photoPreviewUrl){ URL.revokeObjectURL(photoPreviewUrl); }
+  photoFile = file;
+  photoPreviewUrl = URL.createObjectURL(file);
+  photoError = '';
+  statusMsg = 'Foto aufgenommen. Jetzt „Foto & Prompt an Claude senden".';
+  render();
+}
+
+function clearPhoto(){
+  if(photoPreviewUrl){ URL.revokeObjectURL(photoPreviewUrl); }
+  photoFile = null;
+  photoPreviewUrl = '';
+  render();
+}
+
+// Foto + Prompt zusammen an die Claude-App geben (native Teilen-Funktion).
+// Der Prompt wandert zusätzlich in die Zwischenablage, falls das Ziel nur das Bild übernimmt.
+async function sendPhotoToClaude(){
+  const prompt = buildPhotoPrompt();
+  await copyToClipboard(prompt);
+  if(shareFilesSupported()){
+    try{
+      await navigator.share({ files: [photoFile], text: prompt, title: 'Einkaufsfoto' });
+      photoPasteOpen = true;
+      statusMsg = 'An Claude gesendet (Prompt liegt auch in der Zwischenablage). Danach Claudes Antwort unten einfügen.';
+    }catch(e){
+      if(e && e.name === 'AbortError'){ return; }
+      photoPasteOpen = true;
+      statusMsg = 'Teilen nicht möglich – Prompt wurde kopiert. Bitte in der Claude-App einfügen und das Foto anhängen.';
+    }
+  } else {
+    photoPasteOpen = true;
+    statusMsg = 'Prompt kopiert. Öffne die Claude-App, füge den Prompt ein und hänge das aufgenommene Foto an. Danach Antwort unten einfügen.';
+  }
+  render();
+}
+
+// ---------- Spracheingabe (Web Speech API, komplett im Gerät) ----------
+
+const NUM_WORDS = { 'ein':'1','eine':'1','einen':'1','eins':'1','zwei':'2','drei':'3','vier':'4','fünf':'5','sechs':'6','sieben':'7','acht':'8','neun':'9','zehn':'10','elf':'11','zwölf':'12' };
+const UNIT_WORDS = { 'kilo':'kg','kilos':'kg','kilogramm':'kg','gramm':'g','liter':'l','milliliter':'ml','dose':'Dose','dosen':'Dosen','packung':'Packung','packungen':'Packungen','stück':'Stück','stücke':'Stück','flasche':'Flasche','flaschen':'Flaschen','becher':'Becher','glas':'Glas','gläser':'Gläser','bund':'Bund','tüte':'Tüte','tüten':'Tüten' };
+
+function normalizeSpokenLine(line){
+  const words = line.trim().split(/\s+/).filter(Boolean).map((w, i) => {
+    const lw = w.toLowerCase().replace(/[.,;:!?]+$/,'');
+    if(i === 0 && NUM_WORDS[lw]) return NUM_WORDS[lw];
+    if(UNIT_WORDS[lw]) return UNIT_WORDS[lw];
+    return w;
+  });
+  return words.join(' ').trim();
+}
+
+function spokenToLines(text){
+  return text.split(/\s*,\s*|\s+und\s+/i).map(s => s.trim()).filter(Boolean).map(normalizeSpokenLine).filter(Boolean);
+}
+
+function commitVoice(){
+  const finalText = (recognition && recognition._finalText || '').trim();
+  if(finalText){
+    const lines = spokenToLines(finalText);
+    if(lines.length){
+      bulkDraft = (bulkDraft.trim() ? bulkDraft.replace(/\s*$/,'') + '\n' : '') + lines.join('\n');
+    }
+  }
+  recognition = null;
+}
+
+function startVoice(){
+  voiceError = '';
+  if(!voiceSupported){
+    voiceError = 'Live-Spracherkennung wird auf diesem Gerät nicht unterstützt. Tipp: das Mikrofon-Symbol der Handy-Tastatur zum Diktieren ins Textfeld nutzen.';
+    render();
+    return;
+  }
+  try{
+    recognition = new SpeechRec();
+    recognition.lang = 'de-DE';
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition._finalText = '';
+    recognition.onresult = (ev) => {
+      let interim = '';
+      for(let i = ev.resultIndex; i < ev.results.length; i++){
+        const res = ev.results[i];
+        if(res.isFinal) recognition._finalText += res[0].transcript + ' ';
+        else interim += res[0].transcript;
+      }
+      const el = document.getElementById('voice-interim');
+      if(el) el.textContent = (recognition._finalText + interim).trim() || 'Höre zu …';
+    };
+    recognition.onerror = (ev) => {
+      voiceError = ev.error === 'not-allowed'
+        ? 'Mikrofon-Zugriff wurde nicht erlaubt. Bitte in den Browser-/App-Einstellungen freigeben.'
+        : 'Spracherkennung abgebrochen. Bitte erneut versuchen.';
+    };
+    recognition.onend = () => { voiceListening = false; commitVoice(); render(); };
+    recognition.start();
+    voiceListening = true;
+    render();
+  }catch(e){
+    console.error(e);
+    voiceError = 'Spracherkennung konnte nicht gestartet werden.';
+    voiceListening = false;
+    recognition = null;
+    render();
+  }
+}
+
+function stopVoice(){
+  if(recognition){ try{ recognition.stop(); }catch(e){ /* onend übernimmt */ } }
+  else { voiceListening = false; render(); }
 }
 
 // ---------- Event-Delegation ----------
@@ -1065,6 +1217,10 @@ function bindGlobalEvents(){
       }
       case 'discard-ai-suggestions': aiSuggestions = null; aiError=''; render(); break;
       case 'copy-photo-prompt': await copyPhotoPrompt(); break;
+      case 'take-photo': { const inp = document.getElementById('photo-file-input'); if(inp) inp.click(); break; }
+      case 'clear-photo': clearPhoto(); break;
+      case 'send-photo': await sendPhotoToClaude(); break;
+      case 'toggle-voice': voiceListening ? stopVoice() : startVoice(); break;
       case 'toggle-photo-paste': photoPasteOpen = !photoPasteOpen; photoError=''; render(); break;
       case 'import-photo-paste': {
         const ta = document.getElementById('photo-paste-area');
@@ -1111,6 +1267,12 @@ function bindGlobalEvents(){
   });
 
   app.addEventListener('change', async (e) => {
+    if(e.target && e.target.id === 'photo-file-input'){
+      const file = e.target.files && e.target.files[0];
+      if(file) handlePhotoSelected(file);
+      e.target.value = '';
+      return;
+    }
     const el = e.target.closest('[data-action]');
     if(!el) return;
     if(el.dataset.action === 'set-day-recipe'){
@@ -1140,6 +1302,7 @@ function bindGlobalEvents(){
 
   app.addEventListener('input', (e) => {
     const el = e.target;
+    if(el.id === 'bulk-add-text') bulkDraft = el.value;
     if(el.id === 'new-recipe-name') draftName = el.value;
     if(el.id === 'new-recipe-notes') draftNotes = el.value;
     const action = el.dataset && el.dataset.action;
