@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Küchenvorrat</title>
+<meta name="theme-color" content="#1E2A20">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Küchenvorrat">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg: #1E2A20;
+    --bg-soft: #253527;
+    --surface: #EFE6D6;
+    --surface-alt: #E2D5BC;
+    --ink: #241C14;
+    --ink-soft: #6B6152;
+    --accent: #C17817;
+    --accent-deep: #8C5410;
+    --good: #5B7A52;
+    --good-bg: #DCE6D6;
+    --missing: #A3402E;
+    --missing-bg: #F3DAD3;
+    --divider: #C7B896;
+    --radius: 14px;
+  }
+  *{ box-sizing: border-box; }
+  body{ margin:0; background: var(--bg); color: var(--ink); font-family: 'IBM Plex Sans', sans-serif; min-height: 100vh; }
+  #app{ max-width: 980px; margin: 0 auto; padding: 28px 20px 80px; }
+
+  .app-header{ display:flex; align-items:flex-start; justify-content:space-between; margin-bottom: 10px; flex-wrap: wrap; gap: 8px; }
+  .app-header h1{ font-family:'Fraunces', serif; font-weight:700; font-size: 30px; color: var(--surface); margin:0; letter-spacing: 0.2px; }
+  .app-header p{ margin:2px 0 0; color: #B9C4B4; font-size: 13px; }
+  .sync-row{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .sync-time{ color:#9DB194; font-size:12px; }
+  .sync-dot{ display:inline-block; width:8px; height:8px; border-radius:50%; background:#5B7A52; margin-right:4px; }
+  .sync-dot.offline{ background:#A3402E; }
+  .refresh-btn{ background: var(--bg-soft); color: var(--surface); border: 1px solid #3A4E3C; border-radius: 8px; padding: 6px 12px; font-size: 12.5px; cursor:pointer; font-family:'IBM Plex Sans', sans-serif; }
+  .refresh-btn:hover{ background:#2F4230; }
+  .status-banner{ font-size: 12px; color:#E6C08A; margin: 4px 0 16px; min-height: 16px; }
+
+  nav.tabs{ display:flex; gap: 6px; margin-bottom: 22px; border-bottom: 2px solid var(--bg-soft); flex-wrap: wrap; }
+  nav.tabs button{ font-family:'Fraunces', serif; font-weight:600; font-size:15px; background: var(--bg-soft); color: #C9D2C4; border:none; padding: 10px 18px; border-radius: 10px 10px 0 0; cursor:pointer; transform: translateY(2px); transition: all .15s ease; }
+  nav.tabs button.active{ background: var(--surface); color: var(--ink); transform: translateY(0); }
+  nav.tabs button:hover:not(.active){ background:#2C3F2E; color:var(--surface); }
+  nav.tabs button .tab-count{ font-family:'IBM Plex Sans', sans-serif; font-size:11px; font-weight:600; background:var(--accent); color:#fff; border-radius:10px; padding:1px 6px; margin-left:5px; vertical-align:1px; }
+
+  .panel{ display:none; }
+  .panel.active{ display:block; }
+
+  .card{ background: var(--surface); border-radius: var(--radius); padding: 18px 20px; margin-bottom: 16px; box-shadow: 0 3px 0 var(--divider); }
+  .card h2{ font-family:'Fraunces', serif; font-size:19px; margin:0 0 12px; }
+  .card h3{ font-family:'Fraunces', serif; font-size:16px; margin: 0 0 10px; color: var(--ink); }
+
+  .loc-grid{ display:grid; grid-template-columns: repeat(auto-fit, minmax(260px,1fr)); gap:14px; }
+  .loc-block{ background: var(--surface-alt); border-radius: 12px; padding: 14px 14px 8px; }
+  .loc-label{ display:inline-block; font-family:'Fraunces', serif; font-weight:600; font-size:13px; background: var(--accent); color:#fff; padding: 3px 10px; border-radius: 20px; margin-bottom:10px; }
+  .cat-head{ font-family:'Fraunces', serif; font-weight:600; font-size:12.5px; color: var(--accent-deep); margin: 10px 0 2px; padding-bottom:2px; border-bottom: 1px solid var(--divider); display:flex; justify-content:space-between; align-items:center; cursor:pointer; user-select:none; }
+  .cat-head .cat-toggle{ font-size:11px; color:var(--ink-soft); }
+  .item-row{ display:flex; align-items:center; justify-content:space-between; gap:8px; padding: 7px 0; border-bottom: 1px dashed var(--divider); font-size:14px; }
+  .item-row:last-child{ border-bottom:none; }
+  .item-name{ font-weight:500; flex:1; }
+  .item-qty{ display:inline-flex; align-items:center; justify-content:center; min-width: 30px; height:24px; padding:0 6px; border-radius:50%; background: var(--surface); border:2px solid var(--accent); font-size:12px; font-weight:600; color: var(--accent-deep); font-family:'IBM Plex Sans', sans-serif; flex-shrink:0; }
+  .item-actions{ white-space:nowrap; }
+  .item-actions button{ background:none; border:none; cursor:pointer; font-size:15px; color: var(--ink-soft); padding: 2px 5px; }
+  .item-actions button:hover{ color: var(--missing); }
+  .empty-note{ color: var(--ink-soft); font-size: 13px; font-style: italic; padding: 4px 0; }
+
+  .add-row{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top: 6px;}
+  input[type=text], input[type=number], input[type=password], select, textarea{ font-family:'IBM Plex Sans', sans-serif; font-size:14px; padding: 8px 10px; border-radius:8px; border: 1.5px solid var(--divider); background:#fff; color:var(--ink); }
+  input[type=text], input[type=password]{ flex:1; min-width:120px; }
+  textarea{ width:100%; resize:vertical; }
+  .qty-input{ width:70px; flex:none; min-width:0; }
+  .unit-input{ width:80px; flex:none; min-width:0; }
+  button.btn{ font-family:'Fraunces', serif; font-weight:600; font-size:14px; cursor:pointer; background: var(--accent); color:#fff; border:none; padding: 8px 16px; border-radius:8px; transition: background .15s ease; }
+  button.btn:hover{ background: var(--accent-deep); }
+  button.btn.secondary{ background: var(--bg-soft); color:var(--surface); }
+  button.btn.secondary:hover{ background:#33472F; }
+  button.btn.small{ padding:5px 11px; font-size:12.5px; }
+  button.btn:disabled{ opacity:.55; cursor:default; }
+
+  .tag-chip{ display:inline-flex; align-items:center; gap:5px; font-size:12.5px; font-weight:500; background: var(--surface-alt); border:1.5px solid var(--divider); color:var(--ink-soft); padding: 4px 10px; border-radius: 20px; cursor:pointer; margin: 2px 4px 2px 0; user-select:none; }
+  .tag-chip.selected{ background: var(--accent); border-color:var(--accent); color:#fff; }
+
+  .recipe-card{ background: var(--surface-alt); border-radius: 12px; padding: 14px 16px; margin-bottom: 12px; position:relative; }
+  .recipe-top{ display:flex; justify-content:space-between; align-items:flex-start; gap:10px; flex-wrap:wrap;}
+  .recipe-title{ font-family:'Fraunces', serif; font-weight:600; font-size:17px; margin:0; }
+  .avail-badge{ font-size:12px; font-weight:600; padding:4px 10px; border-radius:20px; white-space:nowrap; }
+  .avail-badge.full{ background: var(--good-bg); color: var(--good); }
+  .avail-badge.partial{ background:#F3E9CE; color:#8C6B10; }
+  .avail-badge.none{ background: var(--missing-bg); color: var(--missing); }
+  .ing-list{ list-style:none; padding:0; margin: 8px 0 0; font-size:13.5px; }
+  .ing-list li{ padding: 2px 0; }
+  .ing-list li.have:before{ content:"\25CF "; color: var(--good); }
+  .ing-list li.miss:before{ content:"\25CF "; color: var(--missing); }
+  .recipe-notes{ font-size:13px; color:var(--ink-soft); margin-top:6px; font-style:italic; }
+  .recipe-tags{ margin-top:6px; }
+  .recipe-tag{ display:inline-block; font-size:11.5px; background:var(--bg-soft); color:var(--surface); padding:2px 8px; border-radius:10px; margin: 2px 4px 0 0; }
+  .recipe-controls{ margin-top:10px; display:flex; gap:8px; flex-wrap:wrap; }
+
+  .new-recipe-form{ display:flex; flex-direction:column; gap:10px; }
+  .ing-form-row{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:6px; }
+  .ing-form-row input[type=text]{ flex:2; min-width:100px; }
+  .paste-box{ background:var(--surface-alt); border-radius:10px; padding:10px 12px; }
+  .paste-hint{ font-size:12px; color:var(--ink-soft); margin: 4px 0 8px; }
+
+  .day-block{ background: var(--surface-alt); border-radius:12px; padding:12px 14px; margin-bottom:10px; }
+  .day-head{ display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; }
+  .day-name{ font-family:'Fraunces', serif; font-weight:600; font-size:15px; min-width:80px; }
+  .shopping-list{ list-style:none; padding:0; margin:0; }
+  .shopping-list li{ display:flex; align-items:center; gap:8px; padding:7px 0; font-size:14px; border-bottom:1px dashed var(--divider); }
+  .shopping-list li:last-child{ border-bottom:none; }
+  .shopping-list li.checked .shop-name{ text-decoration: line-through; color: var(--ink-soft); }
+  .shopping-list input[type=checkbox]{ width:18px; height:18px; accent-color: var(--accent); flex-shrink:0; }
+  .shop-name{ flex:1; }
+  .shop-src{ font-size:11px; color:var(--ink-soft); background:var(--surface-alt); border-radius:8px; padding:1px 7px; }
+
+  .status-line{ font-size:12px; color: var(--ink-soft); margin-top: -6px; margin-bottom: 14px; }
+  .card .status-line{ color: var(--ink-soft); }
+  .loading{ color:#B9C4B4; font-family:'Fraunces',serif; padding: 40px 0; text-align:center; }
+
+  .ai-box{ background: var(--surface-alt); border-radius:12px; padding:14px 16px; margin-top: 8px; }
+  .ai-suggestion{ background:#fff; border-radius:10px; padding:12px 14px; margin-top:10px; border: 1.5px dashed var(--accent); }
+  .ai-error{ color: var(--missing); font-size:13px; margin-top:8px; }
+  .ai-prompt-preview{ background:#fff; border-radius:10px; padding:10px 12px; margin-top:10px; font-size:12px; color:var(--ink-soft); max-height:140px; overflow:auto; white-space:pre-wrap; word-break:break-word; }
+
+  .setup-card{ max-width:520px; margin: 40px auto; }
+  .setup-card p{ font-size:14px; line-height:1.5; }
+  .footer-tools{ margin-top: 28px; padding-top: 14px; border-top: 1px solid var(--bg-soft); display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  .footer-note{ color:#9DB194; font-size:11.5px; width:100%; }
+
+  @media (max-width: 560px){
+    nav.tabs button{ padding: 8px 10px; font-size:13px; }
+    .app-header h1{ font-size:24px; }
+    #app{ padding: 20px 12px 70px; }
+  }
+</style>
+</head>
+<body>
+<div id="app"><div class="loading">Vorratsregal wird geladen ...</div></div>
+<script src="firebase-config.js"></script>
+<script type="module" src="store.js"></script>
+<script type="module" src="app.js"></script>
+<script>
+  if('serviceWorker' in navigator){
+    window.addEventListener('load', () => navigator.serviceWorker.register('sw.js'));
+  }
+</script>
+</body>
+</html>
