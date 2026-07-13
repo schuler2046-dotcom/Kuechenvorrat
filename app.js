@@ -8,7 +8,7 @@ const LOCATIONS = ['Gefriertruhe', 'Vorratsschrank', 'Kühlschrank'];
 const CATEGORIES = ['Fleisch & Fisch','Gemüse & Obst','Milchprodukte','Fertiggerichte','Grundnahrungsmittel','Konserven','Gewürze & Saucen','Backwaren','Getränke','Sonstiges'];
 const TAGS = ['proteinreich','fettarm','ausgewogen','vegan','fleischlastig','mit Gemüse','ohne Gemüse'];
 const DAYS = ['Montag','Dienstag','Mittwoch','Donnerstag','Freitag','Samstag','Sonntag'];
-const KNOWN_UNITS = ['g','kg','ml','l','tl','el','stk','stück','dose','dosen','packung','prise','bund','zehe','zehen','stange','scheibe','scheiben'];
+const KNOWN_UNITS = ['g','kg','mg','ml','l','tl','el','stk','stück','dose','dosen','packung','päckchen','pck','prise','bund','zehe','zehen','stange','stangen','scheibe','scheiben','becher','glas','gläser','flasche','flaschen','tasse','tassen','kopf','köpfe','tüte','tüten','msp','messerspitze','esslöffel','teelöffel','liter','gramm','kilogramm','milliliter'];
 const HOUSEHOLD_LS_KEY = 'vorrat-household';
 
 const STARTER_RECIPES = [
@@ -241,18 +241,41 @@ function availabilityBadge(recipe){
   return {cls:'partial', text: have + ' von ' + total + ' vorrätig'};
 }
 
+// Zerlegt eine Zutaten-/Artikelzeile in Bezeichnung, Menge und Einheit. Erkennt u. a.
+// Ziffern, Dezimalzahlen (1,5 / 1.5), Brüche (1/2) und Unicode-Brüche (½) als Menge –
+// auch wenn die Einheit direkt anklebt ("200g Mehl") oder unbekannt/leer ist.
+const FRACTION_MAP = { '½':'0.5','¼':'0.25','¾':'0.75','⅓':'1/3','⅔':'2/3','⅛':'0.125','⅜':'0.375' };
+
 function parseIngredientLine(line){
-  const tokens = line.trim().split(/\s+/).filter(Boolean);
-  if(tokens.length === 0) return null;
-  const first = tokens[0].replace(',', '.');
-  if(/^[\d.\/]+$/.test(first)){
-    const second = (tokens[1] || '').toLowerCase().replace(/[.,]$/,'');
-    if(tokens.length > 2 && KNOWN_UNITS.includes(second)){
-      return { name: tokens.slice(2).join(' '), amount: tokens[0], unit: tokens[1] };
-    }
-    return { name: tokens.slice(1).join(' '), amount: tokens[0], unit: '' };
+  const raw = line.trim();
+  if(!raw) return null;
+  let rest = raw, amount = '', unit = '';
+
+  const uni = rest.match(/^([½¼¾⅓⅔⅛⅜])\s*/);
+  const num = rest.match(/^(\d+(?:[.,]\d+)?(?:\s*\/\s*\d+)?)\s*/);
+  if(uni){
+    amount = FRACTION_MAP[uni[1]] || '';
+    rest = rest.slice(uni[0].length);
+  } else if(num){
+    amount = num[1].replace(/\s+/g,'');
+    rest = rest.slice(num[0].length);
   }
-  return { name: line.trim(), amount: '', unit: '' };
+
+  if(amount){
+    // Direkt folgende Einheit erkennen – auch ohne Leerzeichen (z. B. "200g").
+    const um = rest.match(/^([A-Za-zÄÖÜäöüß.]+)/);
+    if(um){
+      const cand = um[1].toLowerCase().replace(/\.+$/,'');
+      if(KNOWN_UNITS.includes(cand)){
+        unit = um[1].replace(/\.+$/,'');
+        rest = rest.slice(um[1].length).replace(/^[\s.]+/,'');
+      }
+    }
+  }
+
+  const name = rest.trim();
+  if(!name) return { name: raw, amount: '', unit: '' };
+  return { name, amount, unit };
 }
 
 function itemCategory(item){
