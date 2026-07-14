@@ -134,6 +134,7 @@ let bulkDraft = '';
 let editingItemId = null;
 let photoFile = null, photoPreviewUrl = '';
 let voiceListening = false, voiceError = '';
+let voiceStopRequested = false, voiceRestartTimer = null;
 let recognition = null;
 let householdCode = localStorage.getItem(HOUSEHOLD_LS_KEY) || '';
 const receivedKeys = new Set();
@@ -252,41 +253,70 @@ function normalizeAmount(a){
   return FRACTION_MAP[a] || a.replace(/\s+/g,'');
 }
 
-function parseIngredientLine(line){
-  const raw = line.trim();
-  if(!raw) return null;
+// Entfernt führende Aufzählungszeichen und umschließende Trennzeichen aus dem Namen.
+function cleanIngredientName(s){
+  return String(s || '').replace(/^[\s:–—\-•·▪◦‣*]+/,'').replace(/[\s:–—\-]+$/,'').trim();
+}
 
-  // 1) Menge am Anfang der Zeile.
+function isKnownUnitWord(w){
+  return !!w && KNOWN_UNITS.includes(w.toLowerCase().replace(/\.+$/,''));
+}
+
+function parseIngredientLine(line){
+  let raw = String(line || '').trim();
+  if(!raw) return null;
+  // Führende Aufzählungszeichen entfernen ("• ", "- ", "* ", "– " usw.).
+  raw = raw.replace(/^[•·▪◦‣*\-–—]+\s+/, '').trim();
+  if(!raw) return null;
+  // "2x Paprika" / "2 x Paprika" -> "2 Paprika".
+  raw = raw.replace(new RegExp('^(' + AMOUNT_RE + ')\\s*[x×]\\s+', 'i'), '$1 ');
+
+  // A) Menge in Klammern am Ende: "Paprika (2 Stück)".
+  const paren = raw.match(new RegExp('^(.*?)\\s*\\((' + AMOUNT_RE + ')\\s*([A-Za-zÄÖÜäöüß.]*)\\)\\s*$'));
+  if(paren && (paren[3] === '' || isKnownUnitWord(paren[3]))){
+    const name = cleanIngredientName(paren[1]);
+    if(name) return { name, amount: normalizeAmount(paren[2]), unit: paren[3] ? paren[3].replace(/\.+$/,'') : '' };
+  }
+
+  // B) Menge am Anfang der Zeile ("200 g Mehl", "200g Mehl", "1/2 TL Salz").
   const lead = raw.match(new RegExp('^(' + AMOUNT_RE + ')\\s*(.*)$'));
   if(lead){
-    let rest = lead[2];
+    let rest = lead[2].replace(/^[\s:–—\-]+/,'');
     let unit = '';
     const um = rest.match(/^([A-Za-zÄÖÜäöüß.]+)/);
-    if(um){
-      const cand = um[1].toLowerCase().replace(/\.+$/,'');
-      if(KNOWN_UNITS.includes(cand)){
-        unit = um[1].replace(/\.+$/,'');
-        rest = rest.slice(um[1].length).replace(/^[\s.]+/,'');
-      }
+    if(um && isKnownUnitWord(um[1])){
+      unit = um[1].replace(/\.+$/,'');
+      rest = rest.slice(um[1].length).replace(/^[\s.:–—\-]+/,'');
     }
-    const name = rest.trim();
+    const name = cleanIngredientName(rest);
     if(name) return { name, amount: normalizeAmount(lead[1]), unit };
     // Nur Zahl/Einheit ohne Namen – dann lieber den Rohtext als Namen behalten.
-    return { name: raw, amount: '', unit: '' };
+    return { name: cleanIngredientName(raw), amount: '', unit: '' };
   }
 
-  // 2) Menge am Ende der Zeile ("Mehl 200 g", "Mehl 200g", "Karotten 2").
+  // C) Menge am Ende der Zeile ("Mehl 200 g", "Mehl - 200g", "Karotten 2").
   const trail = raw.match(new RegExp('^(.*\\S)\\s+(' + AMOUNT_RE + ')\\s*([A-Za-zÄÖÜäöüß.]*)$'));
-  if(trail){
-    const unitRaw = trail[3] || '';
-    const cand = unitRaw.toLowerCase().replace(/\.+$/,'');
-    if(unitRaw === '' || KNOWN_UNITS.includes(cand)){
-      return { name: trail[1].trim(), amount: normalizeAmount(trail[2]), unit: unitRaw ? unitRaw.replace(/\.+$/,'') : '' };
-    }
+  if(trail && (trail[3] === '' || isKnownUnitWord(trail[3]))){
+    const name = cleanIngredientName(trail[1]);
+    if(name) return { name, amount: normalizeAmount(trail[2]), unit: trail[3] ? trail[3].replace(/\.+$/,'') : '' };
   }
 
-  // 3) Keine Menge erkennbar.
-  return { name: raw, amount: '', unit: '' };
+  // D) Keine Menge erkennbar.
+  return { name: cleanIngredientName(raw), amount: '', unit: '' };
+}
+
+// Zerlegt eine bereits eingetragene Zutat nachträglich, falls die Menge noch komplett
+// im Namensfeld steckt (z. B. manuell "200g Mehl" getippt). Eine bereits gesetzte
+// Menge wird nie überschrieben.
+function normalizeIngredient(ing){
+  if(!ing) return ing;
+  const nm = String(ing.name || '').trim();
+  if(!nm || String(ing.amount || '').trim()) return ing;
+  const p = parseIngredientLine(nm);
+  if(p && p.amount){
+    return { name: p.name, amount: p.amount, unit: (ing.unit && ing.unit.trim()) ? ing.unit : p.unit };
+  }
+  return ing;
 }
 
 function itemCategory(item){
@@ -531,10 +561,10 @@ function renderVorrat(){
   return `
     <div class="card">
       <h2>Einkauf schnell erfassen</h2>
-      <div class="status-line" style="margin-bottom:8px;">Eine Zeile pro Artikel, z. B. „2 kg Kartoffeln" oder einfach „Milch". Per Sprache diktieren oder einfach tippen.</div>
+      <div class="status-line" style="margin-bottom:8px;">Eine Zeile pro Artikel, z. B. „2 kg Kartoffeln" oder einfach „Milch". Beim Sprechen nach jedem Artikel kurz Pause machen – jeder Artikel wird dann eine eigene Zeile.</div>
       <div class="capture-row">
         <button class="btn small ${voiceListening ? 'secondary' : ''}" data-action="toggle-voice">${voiceListening ? '■ Aufnahme stoppen' : '🎤 Einkauf sprechen'}</button>
-        <span class="voice-interim ${voiceListening ? 'live' : ''}" id="voice-interim">${voiceListening ? 'Höre zu … sprich z. B. „zwei Kilo Kartoffeln, drei Dosen Kichererbsen, Milch"' : ''}</span>
+        <span class="voice-interim ${voiceListening ? 'live' : ''}" id="voice-interim">${voiceListening ? 'Höre zu … nach jedem Artikel kurz Pause machen' : ''}</span>
       </div>
       ${voiceError ? `<div class="ai-error">${escapeHtml(voiceError)}</div>` : ''}
       <textarea id="bulk-add-text" rows="3" placeholder="2 kg Kartoffeln&#10;3 Dosen Kichererbsen&#10;Milch">${escapeHtml(bulkDraft)}</textarea>
@@ -943,7 +973,9 @@ async function saveRecipe(){
   const nameEl = document.getElementById('new-recipe-name');
   const name = nameEl.value.trim();
   if(!name){ nameEl.focus(); return; }
-  const ingredients = draftIngredients.filter(i => i.name.trim());
+  // Beim Speichern jede Zutat normalisieren – so wird auch eine manuell ins Namensfeld
+  // getippte Menge ("200g Mehl") noch in Name/Menge/Einheit getrennt.
+  const ingredients = draftIngredients.map(normalizeIngredient).filter(i => i.name.trim());
   const notes = document.getElementById('new-recipe-notes').value.trim();
   const newRecipe = { id: uid(), name, tags: [...draftTags], ingredients, notes };
   recipes = await mutateShared('recipes', recipes, (list) => { list.push(newRecipe); return list; });
@@ -1187,15 +1219,53 @@ function spokenToLines(text){
   return out.map(normalizeSpokenLine).filter(Boolean);
 }
 
-function commitVoice(){
-  const finalText = (recognition && recognition._finalText || '').trim();
-  if(finalText){
-    const lines = spokenToLines(finalText);
-    if(lines.length){
-      bulkDraft = (bulkDraft.trim() ? bulkDraft.replace(/\s*$/,'') + '\n' : '') + lines.join('\n');
-    }
+// Ein erkannter Sprech-Abschnitt (eine Äußerung) wird zu einer oder mehreren
+// Artikelzeilen und live ans Erfassungsfeld angehängt.
+function appendVoiceResult(text){
+  const lines = spokenToLines(text);
+  if(lines.length){
+    bulkDraft = (bulkDraft.trim() ? bulkDraft.replace(/\s*$/,'') + '\n' : '') + lines.join('\n');
+    render();
   }
-  recognition = null;
+}
+
+// Ein Erkennungsdurchlauf = eine Äußerung (bis zur nächsten Sprechpause). Nach dem Ende
+// wird – solange die Aufnahme läuft – automatisch neu gestartet. Dadurch wird jede Pause
+// zwischen zwei Artikeln zu einer eigenen Zeile, unabhängig von Satzzeichen.
+function startVoiceCycle(){
+  recognition = new SpeechRec();
+  recognition.lang = 'de-DE';
+  recognition.continuous = false;
+  recognition.interimResults = true;
+  recognition.onresult = (ev) => {
+    let interim = '', finalPiece = '';
+    for(let i = ev.resultIndex; i < ev.results.length; i++){
+      const res = ev.results[i];
+      if(res.isFinal) finalPiece += res[0].transcript + ' ';
+      else interim += res[0].transcript;
+    }
+    if(finalPiece.trim()) appendVoiceResult(finalPiece);
+    const el = document.getElementById('voice-interim');
+    if(el) el.textContent = interim.trim() || 'Höre zu … nach jedem Artikel kurz Pause machen';
+  };
+  recognition.onerror = (ev) => {
+    if(ev.error === 'not-allowed' || ev.error === 'service-not-allowed'){
+      voiceError = 'Mikrofon-Zugriff wurde nicht erlaubt. Bitte in den Einstellungen freigeben.';
+      voiceStopRequested = true;
+    }
+    // 'no-speech'/'aborted'/'network': onend entscheidet über Neustart.
+  };
+  recognition.onend = () => {
+    recognition = null;
+    if(voiceListening && !voiceStopRequested){
+      voiceRestartTimer = setTimeout(() => { if(voiceListening && !voiceStopRequested) startVoiceCycle(); }, 250);
+    } else {
+      voiceListening = false;
+      render();
+    }
+  };
+  try{ recognition.start(); }
+  catch(e){ /* Start knapp nach Stop kann werfen – onend regelt einen Neustart */ }
 }
 
 function startVoice(){
@@ -1205,43 +1275,18 @@ function startVoice(){
     render();
     return;
   }
-  try{
-    recognition = new SpeechRec();
-    recognition.lang = 'de-DE';
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition._finalText = '';
-    recognition.onresult = (ev) => {
-      let interim = '';
-      for(let i = ev.resultIndex; i < ev.results.length; i++){
-        const res = ev.results[i];
-        if(res.isFinal) recognition._finalText += res[0].transcript.trim() + '\n';
-        else interim += res[0].transcript;
-      }
-      const el = document.getElementById('voice-interim');
-      if(el) el.textContent = (recognition._finalText + interim).trim() || 'Höre zu …';
-    };
-    recognition.onerror = (ev) => {
-      voiceError = ev.error === 'not-allowed'
-        ? 'Mikrofon-Zugriff wurde nicht erlaubt. Bitte in den Browser-/App-Einstellungen freigeben.'
-        : 'Spracherkennung abgebrochen. Bitte erneut versuchen.';
-    };
-    recognition.onend = () => { voiceListening = false; commitVoice(); render(); };
-    recognition.start();
-    voiceListening = true;
-    render();
-  }catch(e){
-    console.error(e);
-    voiceError = 'Spracherkennung konnte nicht gestartet werden.';
-    voiceListening = false;
-    recognition = null;
-    render();
-  }
+  voiceStopRequested = false;
+  voiceListening = true;
+  startVoiceCycle();
+  render();
 }
 
 function stopVoice(){
-  if(recognition){ try{ recognition.stop(); }catch(e){ /* onend übernimmt */ } }
-  else { voiceListening = false; render(); }
+  voiceStopRequested = true;
+  voiceListening = false;
+  if(voiceRestartTimer){ clearTimeout(voiceRestartTimer); voiceRestartTimer = null; }
+  if(recognition){ try{ recognition.stop(); }catch(e){} }
+  render();
 }
 
 // ---------- Event-Delegation ----------
@@ -1495,6 +1540,22 @@ function bindGlobalEvents(){
       const idx = parseInt(el.dataset.idx);
       const field = action === 'draft-ing-name' ? 'name' : action === 'draft-ing-amount' ? 'amount' : 'unit';
       if(draftIngredients[idx]) draftIngredients[idx][field] = el.value;
+    }
+  });
+
+  // Manuell getippte Zutat beim Verlassen des Namensfeldes automatisch in Name/Menge/
+  // Einheit aufteilen (z. B. "200g Mehl"), sofern noch keine Menge gesetzt ist.
+  app.addEventListener('focusout', (e) => {
+    const el = e.target;
+    if(!el || el.dataset.action !== 'draft-ing-name') return;
+    const idx = parseInt(el.dataset.idx);
+    const ing = draftIngredients[idx];
+    if(!ing) return;
+    const before = ing.name + '|' + ing.amount + '|' + ing.unit;
+    const norm = normalizeIngredient(ing);
+    if((norm.name + '|' + norm.amount + '|' + norm.unit) !== before){
+      draftIngredients[idx] = norm;
+      render();
     }
   });
 
