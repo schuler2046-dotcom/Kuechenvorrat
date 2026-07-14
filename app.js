@@ -307,9 +307,12 @@ function buildAiPrompt(){
   return 'Du bist ein Kochassistent für eine deutschsprachige Küche.\n\n' +
     'Unser aktueller Küchenvorrat:\n' + invText + '\n\n' +
     'Gewünschte Eigenschaften der Gerichte: ' + tagText + '.\n\n' +
-    'Schlage 3 unterschiedliche, alltagstaugliche Gerichte vor. Jedes Gericht soll überwiegend aus den vorhandenen Zutaten bestehen; ein bis zwei zusätzliche Grundzutaten (Gewürze, Öl, Salz) sind erlaubt.\n\n' +
-    'Antworte AUSSCHLIESSLICH mit einem JSON-Array in exakt diesem Format, ohne Markdown-Codeblock und ohne Text davor oder danach:\n' +
-    '[{"name": "Gerichtname", "tags": ["nur Werte aus dieser Liste: ' + TAGS.join(', ') + '"], "ingredients": [{"name": "Zutat", "amount": "200", "unit": "g"}], "notes": "Zubereitung in maximal 3 Sätzen"}]';
+    'Schlage GENAU 6 unterschiedliche, alltagstaugliche Gerichte vor:\n' +
+    '- 3 Gerichte, die schnell und einfach zuzubereiten sind (wenige Schritte, etwa 30 Minuten oder weniger) → Feld "aufwand": "schnell".\n' +
+    '- 3 Gerichte, die etwas aufwändiger sind und mehr Zeit brauchen → Feld "aufwand": "aufwändig".\n\n' +
+    'Jedes Gericht soll überwiegend aus den vorhandenen Vorräten bestehen; einzelne zusätzliche Zutaten sind erlaubt (sie werden in der App als fehlend markiert).\n\n' +
+    'Gib die Antwort DIREKT als Text hier im Chat aus – nicht als Datei oder Download, ohne Markdown-Codeblock und ohne Text davor oder danach. Antworte AUSSCHLIESSLICH mit einem JSON-Array in exakt diesem Format:\n' +
+    '[{"name": "Gerichtname", "aufwand": "schnell", "zeit": "ca. 20 Min", "tags": ["nur Werte aus dieser Liste: ' + TAGS.join(', ') + '"], "ingredients": [{"name": "Zutat", "amount": "200", "unit": "g"}], "notes": "Zubereitung in maximal 3 Sätzen"}]';
 }
 
 // ---------- Foto-Erfassung (Copy-Paste über die Claude-App) ----------
@@ -375,6 +378,8 @@ function parseAiRecipes(raw){
     .filter(r => r && typeof r.name === 'string' && r.name.trim())
     .map(r => ({
       name: r.name.trim(),
+      aufwand: (String(r.aufwand || '').toLowerCase().startsWith('aufw')) ? 'aufwändig' : 'schnell',
+      zeit: String(r.zeit || '').trim(),
       tags: (Array.isArray(r.tags) ? r.tags : []).filter(t => TAGS.includes(t)),
       ingredients: (Array.isArray(r.ingredients) ? r.ingredients : []).map(i => ({
         name: String(i.name || '').trim(), amount: String(i.amount || ''), unit: String(i.unit || '')
@@ -642,36 +647,49 @@ function renderRezepte(){
   `;
 }
 
+function renderAiSuggestion(s, idx){
+  const missing = s.ingredients.filter(i => !ingredientAvailable(i.name)).map(i => i.name);
+  const ingHtml = s.ingredients.map(i => {
+    const miss = missing.includes(i.name);
+    return `<li class="${miss?'miss':'have'}">${escapeHtml(i.name)}${i.amount?` (${escapeHtml(String(i.amount))}${i.unit?' '+escapeHtml(i.unit):''})`:''}</li>`;
+  }).join('');
+  const tagsHtml = s.tags.map(t=>`<span class="recipe-tag">${escapeHtml(t)}</span>`).join('');
+  const effort = `<span class="effort-badge">${s.aufwand==='aufwändig'?'aufwändig':'schnell'}${s.zeit?' · '+escapeHtml(s.zeit):''}</span>`;
+  return `
+    <div class="ai-suggestion">
+      <p class="recipe-title">${escapeHtml(s.name)}${effort}</p>
+      <div class="recipe-tags">${tagsHtml}</div>
+      <ul class="ing-list">${ingHtml}</ul>
+      ${s.notes ? `<div class="recipe-notes">${escapeHtml(s.notes)}</div>` : ''}
+      <div class="recipe-controls">
+        <button class="btn small" data-action="save-ai-suggestion" data-idx="${idx}">In Rezeptliste übernehmen</button>
+      </div>
+    </div>
+  `;
+}
+
 function renderAiBox(){
   let suggestionsHtml = '';
   if(aiSuggestions && aiSuggestions.length){
-    suggestionsHtml = aiSuggestions.map((s, idx) => {
-      const missing = s.ingredients.filter(i => !ingredientAvailable(i.name)).map(i => i.name);
-      const ingHtml = s.ingredients.map(i => {
-        const miss = missing.includes(i.name);
-        return `<li class="${miss?'miss':'have'}">${escapeHtml(i.name)}${i.amount?` (${escapeHtml(String(i.amount))}${i.unit?' '+escapeHtml(i.unit):''})`:''}</li>`;
-      }).join('');
-      const tagsHtml = s.tags.map(t=>`<span class="recipe-tag">${escapeHtml(t)}</span>`).join('');
-      return `
-        <div class="ai-suggestion">
-          <p class="recipe-title">${escapeHtml(s.name)}</p>
-          <div class="recipe-tags">${tagsHtml}</div>
-          <ul class="ing-list">${ingHtml}</ul>
-          ${s.notes ? `<div class="recipe-notes">${escapeHtml(s.notes)}</div>` : ''}
-          <div class="recipe-controls">
-            <button class="btn small" data-action="save-ai-suggestion" data-idx="${idx}">In Rezeptliste übernehmen</button>
-          </div>
-        </div>
-      `;
-    }).join('') + `
-      <div class="recipe-controls" style="margin-top:10px;">
+    const groups = [
+      { key:'schnell', label:'⚡ Schnell & einfach' },
+      { key:'aufwändig', label:'🍲 Aufwändiger – mehr Zeit' }
+    ];
+    const sections = groups.map(g => {
+      const items = aiSuggestions.map((s, idx) => ({s, idx})).filter(o => (o.s.aufwand || 'schnell') === g.key);
+      if(!items.length) return '';
+      return `<div class="ai-group-label">${g.label}</div>` + items.map(o => renderAiSuggestion(o.s, o.idx)).join('');
+    }).join('');
+    suggestionsHtml = sections + `
+      <div class="recipe-controls" style="margin-top:12px;">
+        <button class="btn small" data-action="save-all-ai">Alle in Rezeptliste übernehmen</button>
         <button class="btn small secondary" data-action="discard-ai-suggestions">Vorschläge verwerfen</button>
       </div>
     `;
   }
   return `
     <div class="ai-box">
-      <div class="status-line" style="margin-bottom:8px;">So geht's: 1) Prompt kopieren. 2) In der Claude-App einfügen und abschicken. 3) Claudes komplette Antwort kopieren und unten einfügen. Der Prompt enthält euren aktuellen Vorrat und die oben gewählten Tag-Filter.</div>
+      <div class="status-line" style="margin-bottom:8px;">So geht's: 1) „Prompt kopieren". 2) In der Claude-App einfügen und abschicken. 3) Claudes komplette Antwort kopieren und unten einfügen – sie sieht technisch aus (JSON), die App macht daraus automatisch eine lesbare Liste. Du bekommst 6 Vorschläge: 3 schnelle und 3 aufwändigere, passend zu eurem Vorrat und den oben gewählten Tags.</div>
       <div class="recipe-controls">
         <button class="btn small" data-action="copy-ai-prompt">Prompt kopieren</button>
         <button class="btn small secondary" data-action="toggle-ai-paste">${aiPasteOpen ? 'Eingabefeld verbergen' : 'Antwort einfügen'}</button>
@@ -696,11 +714,12 @@ function renderRecipeCard(r){
     return `<li class="${miss?'miss':'have'}">${escapeHtml(i.name)}${i.amount?` (${escapeHtml(String(i.amount))}${i.unit?' '+escapeHtml(i.unit):''})`:''}</li>`;
   }).join('');
   const tagsHtml = r.tags.map(t => `<span class="recipe-tag">${escapeHtml(t)}</span>`).join('');
+  const effort = r.aufwand ? `<span class="effort-badge">${r.aufwand==='aufwändig'?'aufwändig':'schnell'}${r.zeit?' · '+escapeHtml(r.zeit):''}</span>` : '';
 
   return `
     <div class="recipe-card" data-recipe-id="${r.id}">
       <div class="recipe-top">
-        <p class="recipe-title">${escapeHtml(r.name)}</p>
+        <p class="recipe-title">${escapeHtml(r.name)}${effort}</p>
         <span class="avail-badge ${badge.cls}">${badge.text}</span>
       </div>
       <div class="recipe-tags">${tagsHtml}</div>
@@ -1357,11 +1376,28 @@ function bindGlobalEvents(){
       case 'save-ai-suggestion': {
         const s = aiSuggestions && aiSuggestions[parseInt(el.dataset.idx)];
         if(!s) break;
-        const newRecipe = { id: uid(), name: s.name, tags: s.tags, ingredients: s.ingredients, notes: s.notes };
+        const newRecipe = { id: uid(), name: s.name, tags: s.tags, ingredients: s.ingredients, notes: s.notes, aufwand: s.aufwand, zeit: s.zeit };
         recipes = await mutateShared('recipes', recipes, (list) => { list.push(newRecipe); return list; });
         aiSuggestions = aiSuggestions.filter((_, i) => i !== parseInt(el.dataset.idx));
         if(aiSuggestions.length === 0) aiSuggestions = null;
         statusMsg = '„' + s.name + '" wurde in die Rezeptliste übernommen.';
+        render(); break;
+      }
+      case 'save-all-ai': {
+        if(!aiSuggestions || !aiSuggestions.length) break;
+        const toAdd = aiSuggestions;
+        recipes = await mutateShared('recipes', recipes, (list) => {
+          const have = new Set(list.map(r => r.name.trim().toLowerCase()));
+          toAdd.forEach(s => {
+            if(!have.has(s.name.trim().toLowerCase())){
+              list.push({ id: uid(), name: s.name, tags: s.tags, ingredients: s.ingredients, notes: s.notes, aufwand: s.aufwand, zeit: s.zeit });
+            }
+          });
+          return list;
+        });
+        const n = toAdd.length;
+        aiSuggestions = null;
+        statusMsg = n + ' Vorschläge in die Rezeptliste übernommen.';
         render(); break;
       }
       case 'discard-ai-suggestions': aiSuggestions = null; aiError=''; render(); break;
