@@ -132,6 +132,9 @@ let photoItems = null;
 let photoError = '';
 let bulkDraft = '';
 let editingItemId = null;
+let cookingRecipeId = null;
+let cookChecked = new Set(), cookStepsDone = new Set();
+let wakeLock = null;
 let photoFile = null, photoPreviewUrl = '';
 let voiceListening = false, voiceError = '';
 let voiceStopRequested = false, voiceRestartTimer = null;
@@ -230,6 +233,19 @@ function ingredientAvailable(ingName){
 
 function missingIngredients(recipe){
   return recipe.ingredients.filter(ing => !ingredientAvailable(ing.name));
+}
+
+// Liefert die Zubereitungsschritte eines Rezepts. Neue KI-Rezepte haben ein "steps"-Feld;
+// ältere und manuell angelegte Rezepte haben nur "notes" – die werden dann in Zeilen bzw.
+// Sätze zerlegt, damit jedes Rezept einen brauchbaren Kochmodus hat.
+function recipeSteps(r){
+  if(Array.isArray(r.steps) && r.steps.length) return r.steps.filter(Boolean);
+  const n = String(r.notes || '').trim();
+  if(!n) return [];
+  const byLines = n.split('\n').map(s => s.trim()).filter(Boolean);
+  if(byLines.length > 1) return byLines;
+  return n.split(/\.\s+/).map(s => s.trim()).filter(Boolean)
+    .map(s => /[.!?]$/.test(s) ? s : s + '.');
 }
 
 function availabilityBadge(recipe){
@@ -341,8 +357,11 @@ function buildAiPrompt(){
     '- 3 Gerichte, die schnell und einfach zuzubereiten sind (wenige Schritte, etwa 30 Minuten oder weniger) → Feld "aufwand": "schnell".\n' +
     '- 3 Gerichte, die etwas aufwändiger sind und mehr Zeit brauchen → Feld "aufwand": "aufwändig".\n\n' +
     'Jedes Gericht soll überwiegend aus den vorhandenen Vorräten bestehen; einzelne zusätzliche Zutaten sind erlaubt (sie werden in der App als fehlend markiert).\n\n' +
+    'EINHEITEN: Verwende ausschließlich die in Deutschland üblichen metrischen Einheiten, und zwar genau diese Schreibweisen: "g", "ml", "EL", "TL", "Stück", "Prise", "Bund", "Dose", "Packung". ' +
+    'Niemals cups, ounces, oz, pounds, lbs oder Fahrenheit. Temperaturen immer in °C.\n\n' +
+    'ZUBEREITUNG: Gib zu jedem Gericht im Feld "steps" 3 bis 6 kurze Zubereitungsschritte an – je ein Satz, in der Reihenfolge des Kochens. Das Feld "notes" enthält zusätzlich eine Kurzbeschreibung in einem Satz.\n\n' +
     'Gib die Antwort DIREKT als Text hier im Chat aus – nicht als Datei oder Download, ohne Markdown-Codeblock und ohne Text davor oder danach. Antworte AUSSCHLIESSLICH mit einem JSON-Array in exakt diesem Format:\n' +
-    '[{"name": "Gerichtname", "aufwand": "schnell", "zeit": "ca. 20 Min", "tags": ["nur Werte aus dieser Liste: ' + TAGS.join(', ') + '"], "ingredients": [{"name": "Zutat", "amount": "200", "unit": "g"}], "notes": "Zubereitung in maximal 3 Sätzen"}]';
+    '[{"name": "Gerichtname", "aufwand": "schnell", "zeit": "ca. 20 Min", "tags": ["nur Werte aus dieser Liste: ' + TAGS.join(', ') + '"], "ingredients": [{"name": "Zutat", "amount": "200", "unit": "g"}], "steps": ["Erster Schritt.", "Zweiter Schritt."], "notes": "Kurzbeschreibung in einem Satz"}]';
 }
 
 // ---------- Foto-Erfassung (Copy-Paste über die Claude-App) ----------
@@ -414,10 +433,96 @@ function parseAiRecipes(raw){
       ingredients: (Array.isArray(r.ingredients) ? r.ingredients : []).map(i => ({
         name: String(i.name || '').trim(), amount: String(i.amount || ''), unit: String(i.unit || '')
       })).filter(i => i.name),
+      steps: (Array.isArray(r.steps) ? r.steps : []).map(s => String(s || '').trim()).filter(Boolean),
       notes: String(r.notes || '')
     }));
   if(result.length === 0) throw new Error('keine Rezepte erkannt');
   return result;
+}
+
+// ---------- Kochmodus ----------
+
+// Bildschirm während des Kochens anlassen; wird nicht überall unterstützt (dann still ignorieren).
+async function requestWakeLock(){
+  try{
+    if(navigator.wakeLock && !wakeLock) wakeLock = await navigator.wakeLock.request('screen');
+  }catch(e){ /* nicht unterstützt oder abgelehnt – Kochmodus funktioniert trotzdem */ }
+}
+
+async function releaseWakeLock(){
+  try{
+    if(wakeLock){ await wakeLock.release(); }
+  }catch(e){ /* egal */ }
+  wakeLock = null;
+}
+
+function openCookMode(id){
+  cookingRecipeId = id;
+  cookChecked = new Set();
+  cookStepsDone = new Set();
+  requestWakeLock();
+  window.scrollTo(0, 0);
+  render();
+}
+
+function closeCookMode(){
+  cookingRecipeId = null;
+  releaseWakeLock();
+  render();
+}
+
+function renderCookMode(){
+  const r = recipes.find(x => x.id === cookingRecipeId);
+  if(!r){ cookingRecipeId = null; return ''; }
+  const effort = r.aufwand ? `<span class="effort-badge">${r.aufwand==='aufwändig'?'aufwändig':'schnell'}${r.zeit?' · '+escapeHtml(r.zeit):''}</span>` : '';
+
+  const ingHtml = r.ingredients.length
+    ? r.ingredients.map((i, idx) => {
+        const done = cookChecked.has(idx);
+        const miss = !ingredientAvailable(i.name);
+        const qty = i.amount ? escapeHtml(String(i.amount)) + (i.unit ? ' ' + escapeHtml(i.unit) : '') : '';
+        return `
+          <li class="cook-ing ${done?'done':''}" data-action="toggle-cook-ing" data-idx="${idx}">
+            <span class="cook-check">${done ? '✓' : ''}</span>
+            <span class="cook-ing-text">${escapeHtml(i.name)}${qty ? ' <span class="cook-qty">'+qty+'</span>' : ''}</span>
+            ${miss ? '<span class="cook-miss">fehlt</span>' : ''}
+          </li>`;
+      }).join('')
+    : '<li class="empty-note">Keine Zutaten hinterlegt.</li>';
+
+  const steps = recipeSteps(r);
+  const stepsHtml = steps.length
+    ? steps.map((s, idx) => {
+        const done = cookStepsDone.has(idx);
+        return `
+          <li class="cook-step ${done?'done':''}" data-action="toggle-cook-step" data-idx="${idx}">
+            <span class="cook-step-no">${idx+1}</span>
+            <span class="cook-step-text">${escapeHtml(s)}</span>
+          </li>`;
+      }).join('')
+    : '<li class="empty-note">Für dieses Rezept ist noch keine Zubereitung hinterlegt.</li>';
+
+  return `
+    <div class="cook-mode">
+      <div class="cook-head">
+        <button class="btn small secondary" data-action="close-cook">← Zurück</button>
+        <h1 class="cook-title">${escapeHtml(r.name)}${effort}</h1>
+      </div>
+      <div class="cook-card">
+        <h2>Zutaten</h2>
+        <div class="cook-hint">Zum Abhaken antippen.</div>
+        <ul class="cook-ings">${ingHtml}</ul>
+      </div>
+      <div class="cook-card">
+        <h2>Zubereitung</h2>
+        <div class="cook-hint">Erledigten Schritt antippen.</div>
+        <ol class="cook-steps">${stepsHtml}</ol>
+      </div>
+      <div class="cook-foot">
+        <button class="btn secondary" data-action="close-cook">Kochmodus beenden</button>
+      </div>
+    </div>
+  `;
 }
 
 // ---------- Rendering ----------
@@ -432,6 +537,10 @@ function render(){
   const app = document.getElementById('app');
   if(firebaseConfigured() && !householdCode){ app.innerHTML = renderHouseholdScreen(); return; }
   if(!ready){ app.innerHTML = '<div class="loading">Vorratsregal wird geladen ...</div>'; return; }
+  if(cookingRecipeId){
+    const cook = renderCookMode();
+    if(cook){ app.innerHTML = cook; return; }
+  }
   const openCount = openShoppingCount();
   const modeNote = storeMode() === 'firebase'
     ? 'Gemeinsame Liste – Änderungen erscheinen sofort auf allen Geräten.'
@@ -756,6 +865,7 @@ function renderRecipeCard(r){
       <ul class="ing-list">${ingItems}</ul>
       ${r.notes ? `<div class="recipe-notes">${escapeHtml(r.notes)}</div>` : ''}
       <div class="recipe-controls">
+        <button class="btn small" data-action="cook-recipe" data-id="${r.id}">👨‍🍳 Kochen</button>
         <button class="btn small secondary" data-action="plan-recipe" data-id="${r.id}">Für Wochenplan vormerken</button>
         <button class="btn small secondary" data-action="del-recipe" data-id="${r.id}">Löschen</button>
       </div>
@@ -783,7 +893,7 @@ function renderNewRecipeForm(){
       <div>${chips}</div>
       <div id="draft-ing-rows">${ingRows}</div>
       <div><button class="btn small secondary" data-action="add-draft-ing">+ Zutat</button></div>
-      <textarea id="new-recipe-notes" placeholder="Notizen (optional)" rows="2">${escapeHtml(draftNotes)}</textarea>
+      <textarea id="new-recipe-notes" placeholder="Zubereitung – ein Schritt pro Zeile (erscheint so im Kochmodus)" rows="3">${escapeHtml(draftNotes)}</textarea>
       <div><button class="btn" data-action="save-recipe">Rezept speichern</button></div>
     </div>
   `;
@@ -1366,6 +1476,18 @@ function bindGlobalEvents(){
         });
         render(); break;
       }
+      case 'cook-recipe': openCookMode(el.dataset.id); break;
+      case 'close-cook': closeCookMode(); break;
+      case 'toggle-cook-ing': {
+        const idx = parseInt(el.dataset.idx);
+        cookChecked.has(idx) ? cookChecked.delete(idx) : cookChecked.add(idx);
+        render(); break;
+      }
+      case 'toggle-cook-step': {
+        const idx = parseInt(el.dataset.idx);
+        cookStepsDone.has(idx) ? cookStepsDone.delete(idx) : cookStepsDone.add(idx);
+        render(); break;
+      }
       case 'plan-recipe': {
         const id = el.dataset.id;
         const freeDay = DAYS.find(d => !weekplan[d]) || DAYS[0];
@@ -1421,7 +1543,7 @@ function bindGlobalEvents(){
       case 'save-ai-suggestion': {
         const s = aiSuggestions && aiSuggestions[parseInt(el.dataset.idx)];
         if(!s) break;
-        const newRecipe = { id: uid(), name: s.name, tags: s.tags, ingredients: s.ingredients, notes: s.notes, aufwand: s.aufwand, zeit: s.zeit };
+        const newRecipe = { id: uid(), name: s.name, tags: s.tags, ingredients: s.ingredients, steps: s.steps, notes: s.notes, aufwand: s.aufwand, zeit: s.zeit };
         recipes = await mutateShared('recipes', recipes, (list) => { list.push(newRecipe); return list; });
         aiSuggestions = aiSuggestions.filter((_, i) => i !== parseInt(el.dataset.idx));
         if(aiSuggestions.length === 0) aiSuggestions = null;
@@ -1435,7 +1557,7 @@ function bindGlobalEvents(){
           const have = new Set(list.map(r => r.name.trim().toLowerCase()));
           toAdd.forEach(s => {
             if(!have.has(s.name.trim().toLowerCase())){
-              list.push({ id: uid(), name: s.name, tags: s.tags, ingredients: s.ingredients, notes: s.notes, aufwand: s.aufwand, zeit: s.zeit });
+              list.push({ id: uid(), name: s.name, tags: s.tags, ingredients: s.ingredients, steps: s.steps, notes: s.notes, aufwand: s.aufwand, zeit: s.zeit });
             }
           });
           return list;
