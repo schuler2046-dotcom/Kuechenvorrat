@@ -131,6 +131,7 @@ let photoPasteOpen = false;
 let photoItems = null;
 let photoError = '';
 let bulkDraft = '';
+let invSearch = '';
 let editingItemId = null;
 let cookingRecipeId = null;
 let cookChecked = new Set(), cookStepsDone = new Set();
@@ -629,31 +630,57 @@ function renderItemEdit(i){
   `;
 }
 
-function renderVorrat(){
+// Namenstreffer haben Vorrang: Passt der Suchbegriff auf mindestens einen Artikelnamen,
+// wird nur nach Namen gefiltert. Sonst greift die Suche zusätzlich auf Kategorie und
+// Einheit zu (damit z. B. „Milchprodukte" die ganze Kategorie findet).
+function invSearchMode(){
+  const q = invSearch.trim().toLowerCase();
+  if(!q) return { q: '', nameOnly: false };
+  return { q, nameOnly: inventory.some(i => i.name.toLowerCase().includes(q)) };
+}
+
+function invMatches(i, q, nameOnly){
+  if(!q) return true;
+  if(nameOnly) return i.name.toLowerCase().includes(q);
+  return (i.name + ' ' + itemCategory(i) + ' ' + (i.unit || '')).toLowerCase().includes(q);
+}
+
+function invSearchInfo(){
+  const { q, nameOnly } = invSearchMode();
+  if(!q) return '';
+  const n = inventory.filter(i => invMatches(i, q, nameOnly)).length;
+  if(n === 0) return 'Keine Treffer für „' + invSearch.trim() + '".';
+  return n + ' Treffer von ' + inventory.length + ' Artikeln.';
+}
+
+// Die Lagerort-Blöcke. Bei aktiver Suche werden nur Treffer gezeigt, Kategorien sind
+// dann immer aufgeklappt und die Hinzufügen-Zeilen ausgeblendet.
+function renderLocBlocks(){
+  const { q, nameOnly } = invSearchMode();
+  const searching = q.length > 0;
+
   const blocks = LOCATIONS.map(loc => {
-    const items = inventory.filter(i => i.location === loc);
+    const items = inventory.filter(i => i.location === loc && invMatches(i, q, nameOnly));
+    if(searching && items.length === 0) return '';
     let inner;
     if(items.length){
       const groups = CATEGORIES.filter(cat => items.some(i => itemCategory(i) === cat));
       inner = groups.map(cat => {
-        const collapsed = collapsedCats.has(loc + '|' + cat);
+        const collapsed = !searching && collapsedCats.has(loc + '|' + cat);
         const catItems = items.filter(i => itemCategory(i) === cat);
         const rows = collapsed ? '' : catItems.map(renderItemRow).join('');
-        return `
-          <div class="cat-head" data-action="toggle-cat" data-loc="${loc}" data-cat="${escapeHtml(cat)}">
-            <span>${escapeHtml(cat)} (${catItems.length})</span><span class="cat-toggle">${collapsed ? '▸' : '▾'}</span>
-          </div>
-          ${rows}
-        `;
+        const head = searching
+          ? `<div class="cat-head static"><span>${escapeHtml(cat)} (${catItems.length})</span></div>`
+          : `<div class="cat-head" data-action="toggle-cat" data-loc="${loc}" data-cat="${escapeHtml(cat)}">
+               <span>${escapeHtml(cat)} (${catItems.length})</span><span class="cat-toggle">${collapsed ? '▸' : '▾'}</span>
+             </div>`;
+        return head + rows;
       }).join('');
     } else {
       inner = '<div class="empty-note">Noch nichts eingetragen.</div>';
     }
 
-    return `
-      <div class="loc-block">
-        <span class="loc-label">${loc}</span>
-        ${inner}
+    const addRow = searching ? '' : `
         <div class="add-row">
           <input type="text" placeholder="Artikel" class="new-item-name" data-loc="${loc}">
           <input type="number" placeholder="Menge" class="qty-input new-item-qty" data-loc="${loc}" value="1" min="0">
@@ -662,11 +689,35 @@ function renderVorrat(){
             ${CATEGORIES.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('')}
           </select>
           <button class="btn small" data-action="add-item" data-loc="${loc}">Hinzufügen</button>
-        </div>
+        </div>`;
+
+    return `
+      <div class="loc-block">
+        <span class="loc-label">${loc}</span>
+        ${inner}
+        ${addRow}
       </div>
     `;
   }).join('');
 
+  if(searching && !blocks.trim()){
+    return '<div class="empty-note">Kein Artikel gefunden. Tipp: Suche leeren, um wieder alles zu sehen.</div>';
+  }
+  return blocks;
+}
+
+// Aktualisiert nur Liste, Trefferanzeige und Leeren-Knopf – nicht die ganze Seite,
+// damit das Suchfeld beim Tippen den Fokus und die Cursorposition behält.
+function refreshInvSearchView(){
+  const grid = document.getElementById('loc-grid');
+  if(grid) grid.innerHTML = renderLocBlocks();
+  const info = document.getElementById('inv-search-count');
+  if(info) info.textContent = invSearchInfo();
+  const clr = document.getElementById('clear-inv-search');
+  if(clr) clr.hidden = !invSearch.trim();
+}
+
+function renderVorrat(){
   return `
     <div class="card">
       <h2>Einkauf schnell erfassen</h2>
@@ -687,7 +738,15 @@ function renderVorrat(){
       <h2>Einkauf per Foto erfassen</h2>
       ${renderPhotoBox()}
     </div>
-    <div class="card"><h2>Was wir gerade da haben</h2><div class="loc-grid">${blocks}</div></div>
+    <div class="card">
+      <h2>Was wir gerade da haben</h2>
+      <div class="search-row">
+        <input type="search" id="inv-search" placeholder="🔍 Vorrat durchsuchen – z. B. Milch" value="${escapeHtml(invSearch)}" autocomplete="off">
+        <button class="btn small secondary" id="clear-inv-search" data-action="clear-inv-search" ${invSearch.trim() ? '' : 'hidden'}>Suche leeren</button>
+      </div>
+      <div class="status-line" id="inv-search-count">${escapeHtml(invSearchInfo())}</div>
+      <div class="loc-grid" id="loc-grid">${renderLocBlocks()}</div>
+    </div>
   `;
 }
 
@@ -1416,6 +1475,13 @@ function bindGlobalEvents(){
         collapsedCats.has(key) ? collapsedCats.delete(key) : collapsedCats.add(key);
         render(); break;
       }
+      case 'clear-inv-search': {
+        invSearch = '';
+        const inp = document.getElementById('inv-search');
+        if(inp){ inp.value = ''; inp.focus(); }
+        refreshInvSearchView();
+        break;
+      }
       case 'add-item': await addItem(el.dataset.loc); break;
       case 'bulk-add': await bulkAdd(); break;
       case 'inc-item': case 'dec-item': case 'del-item': {
@@ -1654,6 +1720,7 @@ function bindGlobalEvents(){
 
   app.addEventListener('input', (e) => {
     const el = e.target;
+    if(el.id === 'inv-search'){ invSearch = el.value; refreshInvSearchView(); return; }
     if(el.id === 'bulk-add-text') bulkDraft = el.value;
     if(el.id === 'new-recipe-name') draftName = el.value;
     if(el.id === 'new-recipe-notes') draftNotes = el.value;
