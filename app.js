@@ -348,20 +348,23 @@ function openShoppingCount(){
 
 function buildAiPrompt(){
   const invText = inventory.length
-    ? inventory.map(i => '- ' + i.name + (i.amount ? ' (' + i.amount + (i.unit ? ' ' + i.unit : '') + ')' : '') + ', Lagerort: ' + i.location).join('\n')
+    ? inventory.map(i => '- ' + i.name + (i.amount ? ' (' + i.amount + (i.unit ? ' ' + i.unit : '') + ')' : '')).join('\n')
     : '- (aktuell ist nichts eingetragen)';
-  const tagText = recipeFilterTags.length ? recipeFilterTags.join(', ') : 'keine besonderen Vorgaben';
   return 'Du bist ein Kochassistent für eine deutschsprachige Küche.\n\n' +
-    'Unser aktueller Küchenvorrat:\n' + invText + '\n\n' +
-    'Gewünschte Eigenschaften der Gerichte: ' + tagText + '.\n\n' +
-    'Schlage GENAU 6 unterschiedliche, alltagstaugliche Gerichte vor:\n' +
-    '- 3 Gerichte, die schnell und einfach zuzubereiten sind (wenige Schritte, etwa 30 Minuten oder weniger) → Feld "aufwand": "schnell".\n' +
-    '- 3 Gerichte, die etwas aufwändiger sind und mehr Zeit brauchen → Feld "aufwand": "aufwändig".\n\n' +
-    'Jedes Gericht soll überwiegend aus den vorhandenen Vorräten bestehen; einzelne zusätzliche Zutaten sind erlaubt (sie werden in der App als fehlend markiert).\n\n' +
-    'EINHEITEN: Verwende ausschließlich die in Deutschland üblichen metrischen Einheiten, und zwar genau diese Schreibweisen: "g", "ml", "EL", "TL", "Stück", "Prise", "Bund", "Dose", "Packung". ' +
-    'Niemals cups, ounces, oz, pounds, lbs oder Fahrenheit. Temperaturen immer in °C.\n\n' +
-    'ZUBEREITUNG: Gib zu jedem Gericht im Feld "steps" 3 bis 6 kurze Zubereitungsschritte an – je ein Satz, in der Reihenfolge des Kochens. Das Feld "notes" enthält zusätzlich eine Kurzbeschreibung in einem Satz.\n\n' +
-    'Gib die Antwort DIREKT als Text hier im Chat aus – nicht als Datei oder Download, ohne Markdown-Codeblock und ohne Text davor oder danach. Antworte AUSSCHLIESSLICH mit einem JSON-Array in exakt diesem Format:\n' +
+    'Das ist unser aktueller Küchenvorrat – nur die vorhandenen Zutaten, ohne weitere Vorgaben von mir:\n' + invText + '\n\n' +
+    'Antworte auf DIESE Nachricht nur kurz, dass du bereit bist – schlage jetzt noch KEIN Rezept vor. ' +
+    'Ich sage dir in einer der nächsten Nachrichten hier im Chat individuell, worauf ich gerade Lust habe oder was ich kochen möchte ' +
+    '(z. B. eine bestimmte Zutat, ein Gericht, eine Kategorie oder auch einfach „überrasch mich").\n\n' +
+    'Sobald ich dir sage, was ich kochen möchte, schlägst du GENAU 1 passendes Rezept vor (nur wenn ich ausdrücklich mehrere ' +
+    'Vorschläge oder eine Auswahl wünsche, entsprechend mehr). Das Rezept soll überwiegend aus dem oben genannten Vorrat bestehen; ' +
+    'einzelne zusätzliche Zutaten sind erlaubt (sie werden in der App als fehlend markiert).\n\n' +
+    'EINHEITEN: Verwende ausschließlich deutsche/metrische Einheiten mit genauen Endmengen – "g", "mg" und "kg" für Gewicht, ' +
+    '"ml" und "l" für Flüssigkeiten, außerdem "EL", "TL", "Stück", "Prise", "Bund", "Dose", "Packung". Niemals cups, ounces, oz, ' +
+    'pounds, lbs oder Fahrenheit. Temperaturen immer in °C. Gib möglichst genaue Mengen an statt nur „nach Geschmack".\n\n' +
+    'ZUBEREITUNG: Gib im Feld "steps" 3 bis 6 kurze Zubereitungsschritte an – je ein Satz, in der Reihenfolge des Kochens. ' +
+    'Das Feld "notes" enthält zusätzlich eine Kurzbeschreibung in einem Satz.\n\n' +
+    'Sobald du das Rezept nennst, antworte DIREKT als Text hier im Chat – nicht als Datei oder Download, ohne Markdown-Codeblock ' +
+    'und ohne Text davor oder danach. Antworte dann AUSSCHLIESSLICH mit einem JSON-Array in exakt diesem Format:\n' +
     '[{"name": "Gerichtname", "aufwand": "schnell", "zeit": "ca. 20 Min", "tags": ["nur Werte aus dieser Liste: ' + TAGS.join(', ') + '"], "ingredients": [{"name": "Zutat", "amount": "200", "unit": "g"}], "steps": ["Erster Schritt.", "Zweiter Schritt."], "notes": "Kurzbeschreibung in einem Satz"}]';
 }
 
@@ -887,7 +890,7 @@ function renderAiBox(){
   }
   return `
     <div class="ai-box">
-      <div class="status-line" style="margin-bottom:8px;">So geht's: 1) „Prompt kopieren". 2) In der Claude-App einfügen und abschicken. 3) Claudes komplette Antwort kopieren und unten einfügen – sie sieht technisch aus (JSON), die App macht daraus automatisch eine lesbare Liste. Du bekommst 6 Vorschläge: 3 schnelle und 3 aufwändigere, passend zu eurem Vorrat und den oben gewählten Tags.</div>
+      <div class="status-line" style="margin-bottom:8px;">So geht's: 1) „Prompt kopieren" und in der Claude-App einfügen – das schickt nur euren aktuellen Vorrat, noch keine Anfrage. 2) Sag Claude im Chat individuell, worauf du Lust hast oder was du kochen möchtest. 3) Claudes Rezept-Antwort kopieren und hier einfügen – sie sieht technisch aus (JSON), die App macht daraus automatisch eine lesbare Karte im Kochmodus mit Mengenangaben in Gramm/Milliliter.</div>
       <div class="recipe-controls">
         <button class="btn small" data-action="copy-ai-prompt">Prompt kopieren</button>
         <button class="btn small secondary" data-action="toggle-ai-paste">${aiPasteOpen ? 'Eingabefeld verbergen' : 'Antwort einfügen'}</button>
