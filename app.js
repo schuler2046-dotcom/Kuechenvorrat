@@ -363,9 +363,15 @@ function buildAiPrompt(){
     'pounds, lbs oder Fahrenheit. Temperaturen immer in °C. Gib möglichst genaue Mengen an statt nur „nach Geschmack".\n\n' +
     'ZUBEREITUNG: Gib im Feld "steps" 3 bis 6 kurze Zubereitungsschritte an – je ein Satz, in der Reihenfolge des Kochens. ' +
     'Das Feld "notes" enthält zusätzlich eine Kurzbeschreibung in einem Satz.\n\n' +
-    'Sobald du das Rezept nennst, antworte DIREKT als Text hier im Chat – nicht als Datei oder Download, ohne Markdown-Codeblock ' +
-    'und ohne Text davor oder danach. Antworte dann AUSSCHLIESSLICH mit einem JSON-Array in exakt diesem Format:\n' +
-    '[{"name": "Gerichtname", "aufwand": "schnell", "zeit": "ca. 20 Min", "tags": ["nur Werte aus dieser Liste: ' + TAGS.join(', ') + '"], "ingredients": [{"name": "Zutat", "amount": "200", "unit": "g"}], "steps": ["Erster Schritt.", "Zweiter Schritt."], "notes": "Kurzbeschreibung in einem Satz"}]';
+    'Sobald du das Rezept nennst, antworte DIREKT als Text hier im Chat (nicht als Datei oder Download) und in GENAU ZWEI Teilen ' +
+    'in derselben Nachricht:\n\n' +
+    '1) Zuerst eine kurze, gut lesbare Fassung zum Nachkochen – wie im Kochmodus einer Rezept-App: oben strukturiert die Zutaten ' +
+    'mit Mengenangaben als Liste, danach kurz und knapp die Zubereitung als nummerierte Schritte. Normal formatierter Text, kein JSON.\n\n' +
+    '2) Direkt danach, klar getrennt, GENAU EIN JSON-Array mit denselben Angaben in exakt diesem Format – dieser Teil wird zum ' +
+    'Speichern in der App gebraucht (darf in einem Codeblock stehen):\n' +
+    '[{"name": "Gerichtname", "aufwand": "schnell", "zeit": "ca. 20 Min", "tags": ["nur Werte aus dieser Liste: ' + TAGS.join(', ') + '"], "ingredients": [{"name": "Zutat", "amount": "200", "unit": "g"}], "steps": ["Erster Schritt.", "Zweiter Schritt."], "notes": "Kurzbeschreibung in einem Satz"}]\n\n' +
+    'Wichtig: Ich kopiere später deine GESAMTE Antwort (lesbarer Teil + JSON) in die App – dort wird automatisch nur der JSON-Teil ' +
+    'herausgefiltert, um den lesbaren Teil davor musst du dich also nicht extra kümmern.';
 }
 
 // ---------- Foto-Erfassung (Copy-Paste über die Claude-App) ----------
@@ -890,7 +896,7 @@ function renderAiBox(){
   }
   return `
     <div class="ai-box">
-      <div class="status-line" style="margin-bottom:8px;">So geht's: 1) „Prompt kopieren" und in der Claude-App einfügen – das schickt nur euren aktuellen Vorrat, noch keine Anfrage. 2) Sag Claude im Chat individuell, worauf du Lust hast oder was du kochen möchtest. 3) Claudes Rezept-Antwort kopieren und hier einfügen – sie sieht technisch aus (JSON), die App macht daraus automatisch eine lesbare Karte im Kochmodus mit Mengenangaben in Gramm/Milliliter.</div>
+      <div class="status-line" style="margin-bottom:8px;">So geht's: 1) „Prompt kopieren" und in der Claude-App einfügen – das schickt nur euren aktuellen Vorrat, noch keine Anfrage. 2) Sag Claude im Chat individuell, worauf du Lust hast oder was du kochen möchtest – Claude antwortet mit einer lesbaren Fassung zum Nachkochen, gefolgt von einem technischen Datenblock. 3) Claudes GESAMTE Antwort kopieren (beide Teile) und hier einfügen – die App holt sich automatisch nur die Daten heraus und macht daraus eine Karte im Kochmodus mit Mengenangaben in Gramm/Milliliter.</div>
       <div class="recipe-controls">
         <button class="btn small" data-action="copy-ai-prompt">Prompt kopieren</button>
         <button class="btn small secondary" data-action="toggle-ai-paste">${aiPasteOpen ? 'Eingabefeld verbergen' : 'Antwort einfügen'}</button>
