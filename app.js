@@ -351,27 +351,32 @@ function buildAiPrompt(){
     ? inventory.map(i => '- ' + i.name + (i.amount ? ' (' + i.amount + (i.unit ? ' ' + i.unit : '') + ')' : '')).join('\n')
     : '- (aktuell ist nichts eingetragen)';
   return 'Du bist ein Kochassistent für eine deutschsprachige Küche.\n\n' +
+    '━━━ WICHTIGSTE REGEL – GILT FÜR DIESEN GESAMTEN CHAT, AB JETZT, BEI JEDER EINZELNEN REZEPT-ANTWORT ━━━\n' +
+    'Sobald ich dich (in dieser oder einer späteren Nachricht) nach einem Rezept frage, antwortest du IMMER im ' +
+    '„KOCHMODUS"-FORMAT, direkt als Text hier im Chat (niemals als Datei, Download oder Artefakt), in GENAU ZWEI Teilen ' +
+    'in derselben Nachricht:\n\n' +
+    '① KOCHMODUS-ANSICHT (lesbarer Text, KEIN JSON): Überschrift mit dem Gerichtnamen, dann „Zutaten" als Liste mit ' +
+    'Mengenangaben, danach „Zubereitung" als kurze nummerierte Schritte.\n\n' +
+    '② DATENBLOCK (direkt im Anschluss, klar getrennt): GENAU EIN JSON-Array mit denselben Angaben, exakt in diesem ' +
+    'Format (darf in einem Codeblock stehen):\n' +
+    '[{"name": "Gerichtname", "aufwand": "schnell", "zeit": "ca. 20 Min", "tags": ["nur Werte aus dieser Liste: ' + TAGS.join(', ') + '"], "ingredients": [{"name": "Zutat", "amount": "200", "unit": "g"}], "steps": ["Erster Schritt.", "Zweiter Schritt."], "notes": "Kurzbeschreibung in einem Satz"}]\n\n' +
+    'Diese Zwei-Teile-Regel gilt für JEDE Rezept-Antwort in diesem Chat, auch bei einem zweiten oder dritten Rezept – ' +
+    'nicht vergessen. Ich kopiere später deine GESAMTE Antwort (Kochmodus-Ansicht + JSON zusammen) in meine App; dort ' +
+    'wird automatisch nur der JSON-Teil herausgefiltert, um den lesbaren Teil musst du dich nicht extra kümmern.\n' +
+    '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
     'Das ist unser aktueller Küchenvorrat – nur die vorhandenen Zutaten, ohne weitere Vorgaben von mir:\n' + invText + '\n\n' +
     'Antworte auf DIESE Nachricht nur kurz, dass du bereit bist – schlage jetzt noch KEIN Rezept vor. ' +
     'Ich sage dir in einer der nächsten Nachrichten hier im Chat individuell, worauf ich gerade Lust habe oder was ich kochen möchte ' +
     '(z. B. eine bestimmte Zutat, ein Gericht, eine Kategorie oder auch einfach „überrasch mich").\n\n' +
     'Sobald ich dir sage, was ich kochen möchte, schlägst du GENAU 1 passendes Rezept vor (nur wenn ich ausdrücklich mehrere ' +
-    'Vorschläge oder eine Auswahl wünsche, entsprechend mehr). Das Rezept soll überwiegend aus dem oben genannten Vorrat bestehen; ' +
-    'einzelne zusätzliche Zutaten sind erlaubt (sie werden in der App als fehlend markiert).\n\n' +
+    'Vorschläge oder eine Auswahl wünsche, entsprechend mehr) – im oben festgelegten Kochmodus-Format. Das Rezept soll ' +
+    'überwiegend aus dem oben genannten Vorrat bestehen; einzelne zusätzliche Zutaten sind erlaubt (sie werden in der App ' +
+    'als fehlend markiert).\n\n' +
     'EINHEITEN: Verwende ausschließlich deutsche/metrische Einheiten mit genauen Endmengen – "g", "mg" und "kg" für Gewicht, ' +
     '"ml" und "l" für Flüssigkeiten, außerdem "EL", "TL", "Stück", "Prise", "Bund", "Dose", "Packung". Niemals cups, ounces, oz, ' +
     'pounds, lbs oder Fahrenheit. Temperaturen immer in °C. Gib möglichst genaue Mengen an statt nur „nach Geschmack".\n\n' +
-    'ZUBEREITUNG: Gib im Feld "steps" 3 bis 6 kurze Zubereitungsschritte an – je ein Satz, in der Reihenfolge des Kochens. ' +
-    'Das Feld "notes" enthält zusätzlich eine Kurzbeschreibung in einem Satz.\n\n' +
-    'Sobald du das Rezept nennst, antworte DIREKT als Text hier im Chat (nicht als Datei oder Download) und in GENAU ZWEI Teilen ' +
-    'in derselben Nachricht:\n\n' +
-    '1) Zuerst eine kurze, gut lesbare Fassung zum Nachkochen – wie im Kochmodus einer Rezept-App: oben strukturiert die Zutaten ' +
-    'mit Mengenangaben als Liste, danach kurz und knapp die Zubereitung als nummerierte Schritte. Normal formatierter Text, kein JSON.\n\n' +
-    '2) Direkt danach, klar getrennt, GENAU EIN JSON-Array mit denselben Angaben in exakt diesem Format – dieser Teil wird zum ' +
-    'Speichern in der App gebraucht (darf in einem Codeblock stehen):\n' +
-    '[{"name": "Gerichtname", "aufwand": "schnell", "zeit": "ca. 20 Min", "tags": ["nur Werte aus dieser Liste: ' + TAGS.join(', ') + '"], "ingredients": [{"name": "Zutat", "amount": "200", "unit": "g"}], "steps": ["Erster Schritt.", "Zweiter Schritt."], "notes": "Kurzbeschreibung in einem Satz"}]\n\n' +
-    'Wichtig: Ich kopiere später deine GESAMTE Antwort (lesbarer Teil + JSON) in die App – dort wird automatisch nur der JSON-Teil ' +
-    'herausgefiltert, um den lesbaren Teil davor musst du dich also nicht extra kümmern.';
+    'ZUBEREITUNG: Im Feld "steps" bzw. im Kochmodus-Abschnitt „Zubereitung" 3 bis 6 kurze Zubereitungsschritte – je ein ' +
+    'Satz, in der Reihenfolge des Kochens. "notes" enthält zusätzlich eine Kurzbeschreibung in einem Satz.';
 }
 
 // ---------- Foto-Erfassung (Copy-Paste über die Claude-App) ----------
@@ -896,7 +901,7 @@ function renderAiBox(){
   }
   return `
     <div class="ai-box">
-      <div class="status-line" style="margin-bottom:8px;">So geht's: 1) „Prompt kopieren" und in der Claude-App einfügen – das schickt nur euren aktuellen Vorrat, noch keine Anfrage. 2) Sag Claude im Chat individuell, worauf du Lust hast oder was du kochen möchtest – Claude antwortet mit einer lesbaren Fassung zum Nachkochen, gefolgt von einem technischen Datenblock. 3) Claudes GESAMTE Antwort kopieren (beide Teile) und hier einfügen – die App holt sich automatisch nur die Daten heraus und macht daraus eine Karte im Kochmodus mit Mengenangaben in Gramm/Milliliter.</div>
+      <div class="status-line" style="margin-bottom:8px;">So geht's: 1) „Prompt kopieren" und in der Claude-App einfügen – das schickt nur euren aktuellen Vorrat, noch keine Anfrage. 2) Sag Claude im Chat individuell, worauf du Lust hast oder was du kochen möchtest – Claude antwortet mit einer lesbaren Kochmodus-Fassung zum Nachkochen, gefolgt von einem technischen Datenblock. 3) Claudes GESAMTE Antwort kopieren (beide Teile) und hier einfügen – die App holt sich automatisch nur die Daten heraus und macht daraus eine Karte im Kochmodus mit Mengenangaben in Gramm/Milliliter. Tipp: Falls Claude nur den technischen Block ohne lesbaren Text schickt, einfach kurz antworten „Bitte im vereinbarten Kochmodus-Format" – das reicht meist schon.</div>
       <div class="recipe-controls">
         <button class="btn small" data-action="copy-ai-prompt">Prompt kopieren</button>
         <button class="btn small secondary" data-action="toggle-ai-paste">${aiPasteOpen ? 'Eingabefeld verbergen' : 'Antwort einfügen'}</button>
