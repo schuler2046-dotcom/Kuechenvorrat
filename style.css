@@ -289,3 +289,22 @@ button.btn.danger-text{ background:transparent; color:#E0A090; border:1px solid 
 .sticky-actions{ position:fixed; left:0; right:0; bottom:0; z-index:40; display:flex; gap:10px; padding:12px 16px calc(12px + env(safe-area-inset-bottom)); background:var(--bg); border-top:1px solid var(--bg-soft); }
 .sticky-actions .btn{ flex:1; padding:12px; }
 .footer-note-dark{ font-size:12px; color:var(--ink-soft); margin-top:10px; }
+
+/* ---------- Abbuchen-Seite ("Gekocht") ---------- */
+.sheet-page{ padding-bottom: 90px; }
+.status-line-dark{ color:#B9C4B4; font-size:13px; margin-bottom:12px; }
+.portions-row.on-dark{ color:var(--surface); margin-bottom:12px; font-weight:600; }
+.portions-row.on-dark .step-btn{ background:var(--bg-soft); color:var(--surface); border-color:#3A4E3C; }
+.portions-row.on-dark .portions-n{ color:var(--surface); }
+.ded-list{ list-style:none; margin:0; padding:0; }
+.ded{ padding:10px 0; border-bottom:1px dashed var(--divider); }
+.ded:last-child{ border-bottom:none; }
+.ded label{ display:flex; gap:12px; align-items:flex-start; cursor:pointer; }
+.ded input[type=checkbox]{ width:22px; height:22px; accent-color:var(--accent); flex:none; margin-top:2px; }
+.ded-body{ display:block; flex:1; }
+.ded-name{ font-weight:600; }
+.ded-detail{ display:block; font-size:12.5px; color:var(--ink-soft); margin-top:3px; line-height:1.4; }
+.ded.off{ opacity:.8; font-size:14px; }
+.ded-note{ font-size:12px; color:var(--ink-soft); }
+.undo-strip{ display:flex; align-items:center; justify-content:space-between; gap:10px; background:var(--bg-soft); color:var(--surface); border:1px solid #3A4E3C; border-radius:10px; padding:8px 12px; margin:0 0 10px; font-size:13px; }
+.cook-foot{ display:flex; flex-direction:column; gap:10px; align-items:stretch; }

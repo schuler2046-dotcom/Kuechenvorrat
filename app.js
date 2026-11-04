@@ -9,7 +9,8 @@ import { parseIngredientLine, normalizeIngredient } from './parse.js';
 import { buildAiPrompt, buildPhotoPrompt, parseAiRecipes, parsePhotoItems } from './ai.js';
 import { spokenToLines } from './voice.js';
 import { evaluateIngredient, evaluateRecipe, normKey, DEFAULT_STAPLES } from './matching.js';
-import { recipeCardHtml, recipeDetailHtml, editorHtml } from './recipes-ui.js';
+import { recipeCardHtml, recipeDetailHtml, editorHtml, cookSheetHtml } from './recipes-ui.js';
+import { planDeduction, defaultOn, applyDeduction, revertDeduction } from './cook.js';
 import {
   parseAmount, canonicalUnit, isItemUnit, stepFor, formatQuantity, addAmounts,
   suggestPackSize, metricParts, partsFromBase, UNIT_OPTIONS
@@ -37,6 +38,7 @@ let recipeSearch = '', recipeCatFilter = 'alle', recipeShown = 24;
 let viewRecipeId = null, viewPortions = 2, portionsFor = null, aliasFor = null;
 let cookPortions = 2;
 let editing = null;
+let cookSheet = null;
 let settingsOpen = false;
 let aiDetailsOpen = false;
 let aiPasteOpen = false;
@@ -176,6 +178,10 @@ function go(hash){
   else location.hash = hash;
 }
 
+function goReplace(hash){
+  location.replace(hash || '#');
+}
+
 function goBack(){
   if(history.length > 1) history.back();
   else go('');
@@ -184,7 +190,7 @@ function goBack(){
 function routeFromHash(){
   const parts = location.hash.replace(/^#\/?/, '').split('/').map(decodeURIComponent);
   const [a, id, sub] = parts;
-  viewRecipeId = null; cookingRecipeId = null; editing = null; settingsOpen = false; aliasFor = null;
+  viewRecipeId = null; cookingRecipeId = null; editing = null; cookSheet = null; settingsOpen = false; aliasFor = null;
   if(a === 'rezept' && id){
     viewRecipeId = id;
     const r = recipes.find(x => x.id === id);
@@ -196,6 +202,8 @@ function routeFromHash(){
       cookStepsDone = new Set();
     } else if(sub === 'bearbeiten'){
       beginEdit(id);
+    } else if(sub === 'gekocht'){
+      cookSheet = { recipeId: id, portions: viewPortions, on: {} };
     }
   } else if(a === 'neu'){
     beginEdit(null);
@@ -317,6 +325,7 @@ function renderCookMode(){
         <ol class="cook-steps">${stepsHtml}</ol>
       </div>
       <div class="cook-foot">
+        <button class="btn" data-action="cook-done">✔ Fertig gekocht – Zutaten abbuchen</button>
         <button class="btn secondary" data-action="close-cook">Kochmodus beenden</button>
       </div>
     </div>
@@ -330,7 +339,7 @@ function renderRecipeDetail(){
   if(!r){ viewRecipeId = null; return ''; }
   const ev = evalRecipe(r, viewPortions / (r.servings || 2));
   const names = [...new Set(inventory.map(i => String(i.name).trim()))].sort((a, b) => a.localeCompare(b, 'de'));
-  return recipeDetailHtml({ r, ev, portions: viewPortions, img: getImage(r), aliasFor, inventoryNames: names });
+  return recipeDetailHtml({ r, ev, portions: viewPortions, img: getImage(r), aliasFor, inventoryNames: names, cookInfo: cookStats(r.id) });
 }
 
 function beginEdit(id){
@@ -393,6 +402,83 @@ async function saveEdit(){
   editing = null;
   statusMsg = '„' + name + '" gespeichert.';
   location.replace('#/rezept/' + encodeURIComponent(rec.id));
+}
+
+// Wann und wie oft ein Rezept gekocht wurde (aus meta.cookLog).
+function cookStats(id){
+  const log = (meta && Array.isArray(meta.cookLog)) ? meta.cookLog.filter(e => e.id === id) : [];
+  if(!log.length) return null;
+  const last = new Date(log[0].at).toLocaleDateString('de-DE', { day: 'numeric', month: 'short' });
+  return { last, count: log.length };
+}
+
+function undoStripHtml(){
+  const u = meta && meta.undo;
+  if(!u || !u.at || !Array.isArray(u.items)) return '';
+  if(Date.now() - new Date(u.at).getTime() > 30 * 60 * 1000) return '';
+  return `<div class="undo-strip"><span>„${escapeHtml(u.name)}" abgebucht (${u.items.length} Artikel)</span>
+    <button class="btn small" data-action="undo-cook">Rückgängig</button></div>`;
+}
+
+function sheetRows(){
+  const r = recipes.find(x => x.id === cookSheet.recipeId);
+  if(!r) return null;
+  return { r, rows: planDeduction(r, inventory, matchCtx(), cookSheet.portions / (r.servings || 2)) };
+}
+
+function renderCookSheet(){
+  const data = sheetRows();
+  if(!data){ cookSheet = null; return ''; }
+  const names = [...new Set(inventory.map(i => String(i.name).trim()))].sort((a, b) => a.localeCompare(b, 'de'));
+  return cookSheetHtml({
+    r: data.r, portions: cookSheet.portions, rows: data.rows, aliasFor, inventoryNames: names,
+    on: (row) => cookSheet.on[row.idx] ?? defaultOn(row)
+  });
+}
+
+// Bucht die angehakten Zutaten ab: eine Transaktion auf dem aktuellen Vorrat, mit Rückgängig-Möglichkeit.
+async function confirmCook(){
+  const data = sheetRows();
+  if(!data) return;
+  const { r, rows } = data;
+  const portions = cookSheet.portions;
+  const picks = rows
+    .filter(row => row.kind === 'deduct' && (cookSheet.on[row.idx] ?? defaultOn(row)))
+    .flatMap(row => row.picks);
+  let undo = [];
+  if(picks.length){
+    inventory = await mutateShared('inventory', inventory, (inv) => {
+      const res = applyDeduction(inv, picks);
+      undo = res.undo;
+      return res.inventory;
+    });
+  }
+  const at = new Date().toISOString();
+  meta = await mutateShared('meta', meta, (m) => {
+    m = m || {};
+    m.cookLog = [{ id: r.id, name: r.name, at, portions }, ...(m.cookLog || [])].slice(0, 200);
+    if(undo.length) m.undo = { at, name: r.name, items: undo };
+    else delete m.undo;
+    return m;
+  });
+  cookSheet = null;
+  statusMsg = undo.length ? '' : '„' + r.name + '" als gekocht gemerkt.';
+  activeTab = 'vorrat';
+  goReplace('#');
+}
+
+async function undoCook(){
+  const u = meta && meta.undo;
+  if(!u) return;
+  inventory = await mutateShared('inventory', inventory, (inv) => revertDeduction(inv, u.items));
+  meta = await mutateShared('meta', meta, (m) => {
+    m = m || {};
+    delete m.undo;
+    if(Array.isArray(m.cookLog) && m.cookLog[0] && m.cookLog[0].at === u.at) m.cookLog = m.cookLog.slice(1);
+    return m;
+  });
+  statusMsg = 'Abbuchung rückgängig gemacht.';
+  render();
 }
 
 function renderEditor(){
@@ -464,6 +550,10 @@ function render(){
   const app = document.getElementById('app');
   if(firebaseConfigured() && !householdCode){ app.innerHTML = renderHouseholdScreen(); return; }
   if(!ready){ app.innerHTML = '<div class="loading">Vorratsregal wird geladen ...</div>'; return; }
+  if(cookSheet){
+    const sheet = renderCookSheet();
+    if(sheet){ app.innerHTML = sheet; return; }
+  }
   if(editing){ app.innerHTML = renderEditor(); return; }
   if(cookingRecipeId){
     const cook = renderCookMode();
@@ -491,6 +581,7 @@ function render(){
         <button class="icon-btn" data-action="open-settings" aria-label="Einstellungen" title="Einstellungen">⚙</button>
       </div>
     </div>
+    ${undoStripHtml()}
     <div class="status-banner">${statusMsg ? escapeHtml(statusMsg) : ''}</div>
     <div class="panel active">${(panels[activeTab] || renderVorrat)()}</div>
     <nav class="tabs bottom">
@@ -1442,6 +1533,12 @@ function bindGlobalEvents(){
       case 'edit-recipe': go('#/rezept/' + encodeURIComponent(el.dataset.id) + '/bearbeiten'); break;
       case 'cook-recipe': go('#/rezept/' + encodeURIComponent(el.dataset.id) + '/kochen'); break;
       case 'close-cook': goBack(); break;
+      case 'cook-done-open': go('#/rezept/' + encodeURIComponent(el.dataset.id) + '/gekocht'); break;
+      case 'cook-done': viewPortions = cookPortions; go('#/rezept/' + encodeURIComponent(cookingRecipeId) + '/gekocht'); break;
+      case 'sheet-portions-inc': cookSheet.portions += 1; render(); break;
+      case 'sheet-portions-dec': cookSheet.portions = Math.max(1, cookSheet.portions - 1); render(); break;
+      case 'sheet-confirm': await confirmCook(); break;
+      case 'undo-cook': await undoCook(); break;
       case 'portions-inc': viewPortions += 1; render(); break;
       case 'portions-dec': viewPortions = Math.max(1, viewPortions - 1); render(); break;
       case 'cook-portions-inc': cookPortions += 1; render(); break;
@@ -1683,6 +1780,11 @@ function bindGlobalEvents(){
       } else {
         editing.category = el.value;
       }
+      return;
+    }
+    if(el.dataset.action === 'ded-toggle' && cookSheet){
+      cookSheet.on[parseInt(el.dataset.idx)] = el.checked;
+      render();
       return;
     }
     if(el.dataset.action === 'edit-ing-approx' && editing){

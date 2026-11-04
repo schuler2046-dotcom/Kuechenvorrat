@@ -225,7 +225,7 @@ export function matchItems(name, inventory, ctx = {}){
 
 // ---------- Mengenprüfung ----------
 
-function isLoose(ing, q, items){
+export function isLoose(ing, q, items){
   if(ing.approx) return true;
   if(!q) return true;
   if(items.some(i => i.category === 'Gewürze & Saucen')) return true;

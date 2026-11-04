@@ -3,7 +3,7 @@
 
 import { escapeHtml as esc } from './util.js';
 import { TAGS } from './constants.js';
-import { formatQuantity, parseAmount, canonicalUnit, unitInfo, RECIPE_UNIT_OPTIONS } from './units.js';
+import { formatQuantity, formatBase, parseAmount, canonicalUnit, unitInfo, RECIPE_UNIT_OPTIONS } from './units.js';
 import { summaryText, shortText } from './matching.js';
 
 export function categoryEmoji(cat){
@@ -84,7 +84,7 @@ function ingredientRowHtml(row, idx, factor, aliasFor, inventoryNames){
 
 // Detailansicht eines Rezepts.
 export function recipeDetailHtml(o){
-  const { r, ev, portions, img, aliasFor, inventoryNames } = o;
+  const { r, ev, portions, img, aliasFor, inventoryNames, cookInfo } = o;
   const base = r.servings || 2;
   const factor = portions / base;
   const notice = r.status === 'unvollstaendig'
@@ -95,7 +95,8 @@ export function recipeDetailHtml(o){
   const facts = [
     r.category ? `<span class="badge">${esc(r.category)}</span>` : '',
     r.zeit ? `<span>⏱ ${esc(r.zeit)}</span>` : '',
-    r.source === 'instagram' && r.author ? `<span>@${esc(r.author)}</span>` : ''
+    r.source === 'instagram' && r.author ? `<span>@${esc(r.author)}</span>` : '',
+    cookInfo ? `<span>zuletzt gekocht: ${esc(cookInfo.last)}${cookInfo.count > 1 ? ' (' + cookInfo.count + '×)' : ''}</span>` : ''
   ].filter(Boolean).join('');
   const tags = (r.tags || []).map(t => `<span class="recipe-tag">${esc(t)}</span>`).join('');
   const steps = (Array.isArray(r.steps) && r.steps.length)
@@ -119,6 +120,7 @@ export function recipeDetailHtml(o){
       ${notice}
       <div class="detail-actions">
         <button class="btn" data-action="cook-recipe" data-id="${esc(r.id)}">👨‍🍳 Kochen</button>
+        <button class="btn secondary" data-action="cook-done-open" data-id="${esc(r.id)}">✔ Gekocht</button>
         <button class="btn secondary" data-action="plan-recipe" data-id="${esc(r.id)}">Wochenplan</button>
         ${r.sourceUrl ? `<a class="btn secondary" href="${esc(r.sourceUrl)}" target="_blank" rel="noopener noreferrer">Original</a>` : ''}
       </div>
@@ -221,6 +223,79 @@ export function editorHtml(edit, categories){
       <div class="sticky-actions">
         <button class="btn secondary" data-action="edit-cancel">Abbrechen</button>
         <button class="btn" data-action="edit-save">Speichern</button>
+      </div>
+    </div>`;
+}
+
+function pickText(p){
+  const after = p.after === 0 ? 'leer' : formatQuantity(p.after, p.before.unit);
+  const where = p.location ? ` (${esc(p.location)})` : '';
+  return `${esc(formatBase(p.dim, p.take))} von ${esc(p.name)}${where}: ${esc(formatQuantity(p.before.amount, p.before.unit))} → ${esc(after)}`;
+}
+
+function dedRowHtml(row, on, aliasFor, inventoryNames){
+  const name = esc(row.ing.name);
+  if(row.kind === 'staple') return '';
+  if(row.kind === 'missing'){
+    const picker = aliasFor === row.idx ? `
+      <div class="alias-pick">
+        <select data-action="alias-pick" data-idx="${row.idx}">
+          <option value="">Welcher Vorratsartikel ist das?</option>
+          ${inventoryNames.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join('')}
+        </select>
+      </div>` : '';
+    return `<li class="ded off"><div><span class="ded-name">${name}</span> <span class="ded-note">nicht im Vorrat – nichts abzubuchen</span>
+      <button class="link-btn" data-action="alias-open" data-idx="${row.idx}">Hab ich anders</button></div>${picker}</li>`;
+  }
+  if(row.kind === 'unknown') return `<li class="ded off"><span class="ded-name">${name}</span> <span class="ded-note">keine Menge im Rezept</span></li>`;
+  if(row.kind === 'unconvertible'){
+    return `<li class="ded off"><span class="ded-name">${name}</span> <span class="ded-note">Menge nicht umrechenbar (Packungsgröße am Vorratsartikel eintragen)</span></li>`;
+  }
+  const flags = [
+    row.short > 0 ? `<span class="ing-info short">es fehlen ${esc(formatBase(row.need.dim, row.short))}</span>` : '',
+    row.loose ? '<span class="ing-info">kleine Menge</span>' : '',
+    row.substitute ? '<span class="ing-info">Ersatz</span>' : ''
+  ].filter(Boolean).join(' ');
+  return `
+    <li class="ded">
+      <label>
+        <input type="checkbox" data-action="ded-toggle" data-idx="${row.idx}" ${on ? 'checked' : ''}>
+        <span class="ded-body">
+          <span class="ded-name">${name}</span> ${flags}
+          <span class="ded-detail">${row.picks.map(pickText).join('<br>')}</span>
+        </span>
+      </label>
+    </li>`;
+}
+
+// Abbuchen-Seite: zeigt je Zutat, was aus welchem Vorratsartikel abgezogen wird.
+export function cookSheetHtml(o){
+  const { r, portions, rows, on, aliasFor, inventoryNames } = o;
+  const list = rows.map(row => dedRowHtml(row, on(row), aliasFor, inventoryNames)).join('');
+  const count = rows.filter(row => row.kind === 'deduct' && on(row)).length;
+  const staples = rows.some(row => row.kind === 'staple');
+  return `
+    <div class="sheet-page">
+      <div class="detail-bar">
+        <button class="btn small secondary" data-action="go-back">← Zurück</button>
+      </div>
+      <h1 class="detail-title">Gekocht: ${esc(r.name)}</h1>
+      <div class="status-line-dark">Die Haken bestimmen, was aus dem Vorrat abgezogen wird. Kleine Mengen und Gewürze sind vorerst abgewählt.</div>
+      <div class="portions-row on-dark">
+        <span>Portionen</span>
+        <span class="portions">
+          <button class="step-btn" data-action="sheet-portions-dec" aria-label="Weniger Portionen">−</button>
+          <span class="portions-n">${portions}</span>
+          <button class="step-btn" data-action="sheet-portions-inc" aria-label="Mehr Portionen">+</button>
+        </span>
+      </div>
+      <div class="card">
+        <ul class="ded-list">${list || '<li class="empty-note">Keine Zutaten.</li>'}</ul>
+        ${staples ? '<div class="hint">Grundvorrat (z. B. Salz) wird nicht abgebucht.</div>' : ''}
+      </div>
+      <div class="sticky-actions">
+        <button class="btn secondary" data-action="go-back">Abbrechen</button>
+        <button class="btn" data-action="sheet-confirm">${count ? count + ' Zutat' + (count === 1 ? '' : 'en') + ' abbuchen' : 'Nur als gekocht merken'}</button>
       </div>
     </div>`;
 }
