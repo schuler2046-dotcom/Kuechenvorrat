@@ -918,9 +918,9 @@ function filteredRecipes(){
   if(recipeFilterTags.length) list = list.filter(r => recipeFilterTags.every(t => (r.tags || []).includes(t)));
   let rows = list.map(r => ({ r, ev: evalRecipe(r) }));
   if(recipeCatFilter === 'kochbar') rows = rows.filter(x => x.ev.ok && x.ev.total > 0);
-  rows.sort((a, b) =>
-    (a.ev.missing.length + a.ev.short.length) - (b.ev.missing.length + b.ev.short.length)
-    || a.r.name.localeCompare(b.r.name, 'de'));
+  // Vollständige Rezepte nach Verfügbarkeit zuerst, Rezepte ohne Zutatenliste ans Ende.
+  const lacking = x => x.ev.total === 0 ? 1e6 : x.ev.missing.length + x.ev.short.length;
+  rows.sort((a, b) => lacking(a) - lacking(b) || a.r.name.localeCompare(b.r.name, 'de'));
   return rows;
 }
 
