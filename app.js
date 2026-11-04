@@ -3,107 +3,13 @@
 // Datenzugriff über store.js (Firestore-Echtzeit-Sync bzw. lokaler Fallback).
 
 import { initStore, mutate, storeMode, DATA_KEYS } from './store.js';
+import { LOCATIONS, CATEGORIES, TAGS, DAYS } from './constants.js';
+import { uid, escapeHtml } from './util.js';
+import { parseIngredientLine, normalizeIngredient } from './parse.js';
+import { buildAiPrompt, buildPhotoPrompt, parseAiRecipes, parsePhotoItems } from './ai.js';
+import { spokenToLines } from './voice.js';
 
-const LOCATIONS = ['Gefriertruhe', 'Vorratsschrank', 'Kühlschrank'];
-const CATEGORIES = ['Fleisch & Fisch','Gemüse & Obst','Milchprodukte','Fertiggerichte','Grundnahrungsmittel','Konserven','Gewürze & Saucen','Backwaren','Getränke','Sonstiges'];
-const TAGS = ['proteinreich','fettarm','ausgewogen','vegan','fleischlastig','mit Gemüse','ohne Gemüse'];
-const DAYS = ['Montag','Dienstag','Mittwoch','Donnerstag','Freitag','Samstag','Sonntag'];
-const KNOWN_UNITS = ['g','kg','mg','ml','l','tl','el','stk','stück','dose','dosen','packung','päckchen','pck','prise','bund','zehe','zehen','stange','stangen','scheibe','scheiben','becher','glas','gläser','flasche','flaschen','tasse','tassen','kopf','köpfe','tüte','tüten','msp','messerspitze','esslöffel','teelöffel','liter','gramm','kilogramm','milliliter','blatt','blätter','zweig','zweige','handvoll','portion','portionen','würfel','riegel','tropfen'];
 const HOUSEHOLD_LS_KEY = 'vorrat-household';
-
-const STARTER_RECIPES = [
-  { name: 'Spaghetti Bolognese', tags: ['fleischlastig','mit Gemüse'], ingredients: [
-    {name:'Spaghetti', amount:'250', unit:'g'}, {name:'Hackfleisch', amount:'400', unit:'g'},
-    {name:'Zwiebel', amount:'1', unit:''}, {name:'Karotte', amount:'1', unit:''},
-    {name:'Tomaten passiert', amount:'400', unit:'g'}, {name:'Knoblauch', amount:'2', unit:'Zehen'}
-  ], notes: 'Gemüse klein würfeln, Hackfleisch anbraten, mit Tomaten ablöschen, 20 Min köcheln.' },
-  { name: 'Linsensuppe', tags: ['vegan','proteinreich','ausgewogen'], ingredients: [
-    {name:'rote Linsen', amount:'250', unit:'g'}, {name:'Karotte', amount:'2', unit:''},
-    {name:'Kartoffel', amount:'2', unit:''}, {name:'Zwiebel', amount:'1', unit:''},
-    {name:'Gemüsebrühe', amount:'1', unit:'l'}
-  ], notes: 'Gemüse würfeln, mit Linsen und Brühe 20 Min köcheln, pürieren nach Belieben.' },
-  { name: 'Gemüsepfanne mit Reis', tags: ['vegan','mit Gemüse','fettarm'], ingredients: [
-    {name:'Reis', amount:'200', unit:'g'}, {name:'Paprika', amount:'2', unit:''},
-    {name:'Zucchini', amount:'1', unit:''}, {name:'Sojasauce', amount:'2', unit:'EL'},
-    {name:'Ingwer', amount:'1', unit:'Stück'}
-  ], notes: 'Reis kochen, Gemüse scharf anbraten, mit Sojasauce abschmecken.' },
-  { name: 'Kartoffelgratin', tags: ['ausgewogen','mit Gemüse'], ingredients: [
-    {name:'Kartoffeln', amount:'1', unit:'kg'}, {name:'Sahne', amount:'200', unit:'ml'},
-    {name:'Käse gerieben', amount:'150', unit:'g'}, {name:'Knoblauch', amount:'1', unit:'Zehe'}
-  ], notes: 'Kartoffeln in Scheiben schichten, mit Sahne übergießen, Käse drauf, 45 Min überbacken.' },
-  { name: 'Hähnchen-Curry mit Reis', tags: ['fleischlastig','proteinreich','mit Gemüse'], ingredients: [
-    {name:'Hähnchenbrust', amount:'400', unit:'g'}, {name:'Kokosmilch', amount:'400', unit:'ml'},
-    {name:'Currypaste', amount:'2', unit:'EL'}, {name:'Paprika', amount:'1', unit:''},
-    {name:'Reis', amount:'200', unit:'g'}
-  ], notes: 'Hähnchen anbraten, Currypaste und Kokosmilch dazu, mit Gemüse 15 Min köcheln.' },
-  { name: 'Chili sin Carne', tags: ['vegan','proteinreich','mit Gemüse'], ingredients: [
-    {name:'Kidneybohnen', amount:'1', unit:'Dose'}, {name:'Mais', amount:'1', unit:'Dose'},
-    {name:'Tomaten stückig', amount:'400', unit:'g'}, {name:'Zwiebel', amount:'1', unit:''},
-    {name:'Paprika', amount:'1', unit:''}
-  ], notes: 'Zwiebel anbraten, restliche Zutaten dazu, 20 Min köcheln lassen.' },
-  { name: 'Bunter Nudelsalat', tags: ['ausgewogen','mit Gemüse','fettarm'], ingredients: [
-    {name:'Nudeln', amount:'250', unit:'g'}, {name:'Cherrytomaten', amount:'150', unit:'g'},
-    {name:'Gurke', amount:'1', unit:''}, {name:'Feta', amount:'100', unit:'g'},
-    {name:'Olivenöl', amount:'2', unit:'EL'}
-  ], notes: 'Nudeln kochen, abkühlen lassen, mit Gemüse und Feta mischen.' },
-  { name: 'Kichererbsen-Curry', tags: ['vegan','proteinreich','mit Gemüse'], ingredients: [
-    {name:'Kichererbsen', amount:'1', unit:'Dose'}, {name:'Kokosmilch', amount:'400', unit:'ml'},
-    {name:'Spinat', amount:'200', unit:'g'}, {name:'Currypulver', amount:'1', unit:'EL'},
-    {name:'Zwiebel', amount:'1', unit:''}
-  ], notes: 'Zwiebel andünsten, Currypulver kurz mitrösten, restliche Zutaten dazugeben, 15 Min köcheln.' },
-  { name: 'Rührei mit Gemüse', tags: ['proteinreich','ausgewogen','mit Gemüse'], ingredients: [
-    {name:'Eier', amount:'4', unit:''}, {name:'Paprika', amount:'1', unit:''},
-    {name:'Champignons', amount:'150', unit:'g'}, {name:'Schnittlauch', amount:'1', unit:'Bund'}
-  ], notes: 'Gemüse anbraten, verquirlte Eier dazugeben, unter Rühren stocken lassen.' },
-  { name: 'Ofengemüse mit Feta', tags: ['ausgewogen','mit Gemüse','fettarm'], ingredients: [
-    {name:'Zucchini', amount:'1', unit:''}, {name:'Paprika', amount:'2', unit:''},
-    {name:'rote Zwiebel', amount:'1', unit:''}, {name:'Feta', amount:'150', unit:'g'},
-    {name:'Olivenöl', amount:'2', unit:'EL'}
-  ], notes: 'Gemüse in Stücke schneiden, mit Öl vermengen, 25 Min bei 200 Grad backen, Feta darüberbröseln.' },
-  { name: 'Linsen-Bolognese vegan', tags: ['vegan','proteinreich','mit Gemüse'], ingredients: [
-    {name:'braune Linsen', amount:'200', unit:'g'}, {name:'Tomaten passiert', amount:'400', unit:'g'},
-    {name:'Karotte', amount:'1', unit:''}, {name:'Zwiebel', amount:'1', unit:''},
-    {name:'Spaghetti', amount:'250', unit:'g'}
-  ], notes: 'Linsen mit Gemüse und Tomaten 25 Min köcheln, mit Nudeln servieren.' },
-  { name: 'Hähnchenbrust mit Brokkoli', tags: ['proteinreich','fettarm','mit Gemüse'], ingredients: [
-    {name:'Hähnchenbrust', amount:'400', unit:'g'}, {name:'Brokkoli', amount:'1', unit:''},
-    {name:'Reis', amount:'150', unit:'g'}, {name:'Sojasauce', amount:'1', unit:'EL'}
-  ], notes: 'Hähnchen würzen und braten, Brokkoli dämpfen, mit Reis anrichten.' },
-  { name: 'Kartoffelsuppe', tags: ['ausgewogen','fettarm'], ingredients: [
-    {name:'Kartoffeln', amount:'800', unit:'g'}, {name:'Karotte', amount:'2', unit:''},
-    {name:'Lauch', amount:'1', unit:''}, {name:'Gemüsebrühe', amount:'1', unit:'l'}
-  ], notes: 'Gemüse würfeln, in Brühe weich kochen, teilweise pürieren.' },
-  { name: 'Gemüseeintopf', tags: ['vegan','ausgewogen','mit Gemüse','fettarm'], ingredients: [
-    {name:'Kartoffeln', amount:'3', unit:''}, {name:'Karotte', amount:'2', unit:''},
-    {name:'Sellerie', amount:'1', unit:'Stange'}, {name:'Erbsen', amount:'150', unit:'g'},
-    {name:'Gemüsebrühe', amount:'1', unit:'l'}
-  ], notes: 'Alles klein schneiden, in Brühe 25 Min köcheln.' },
-  { name: 'Herzhafte Pfannkuchen', tags: ['ausgewogen','ohne Gemüse'], ingredients: [
-    {name:'Mehl', amount:'200', unit:'g'}, {name:'Milch', amount:'300', unit:'ml'},
-    {name:'Eier', amount:'2', unit:''}, {name:'Schinken', amount:'100', unit:'g'},
-    {name:'Käse gerieben', amount:'80', unit:'g'}
-  ], notes: 'Teig anrühren, dünn ausbacken, mit Schinken und Käse füllen.' },
-  { name: 'Thunfischsalat', tags: ['proteinreich','fettarm','mit Gemüse'], ingredients: [
-    {name:'Thunfisch', amount:'1', unit:'Dose'}, {name:'Tomaten', amount:'2', unit:''},
-    {name:'rote Zwiebel', amount:'1', unit:''}, {name:'Mais', amount:'1', unit:'Dose'},
-    {name:'Olivenöl', amount:'1', unit:'EL'}
-  ], notes: 'Alle Zutaten würfeln bzw. abtropfen lassen und vermengen.' },
-  { name: 'Shakshuka', tags: ['proteinreich','mit Gemüse'], ingredients: [
-    {name:'Eier', amount:'4', unit:''}, {name:'Tomaten stückig', amount:'400', unit:'g'},
-    {name:'Paprika', amount:'1', unit:''}, {name:'Zwiebel', amount:'1', unit:''},
-    {name:'Kreuzkümmel', amount:'1', unit:'TL'}
-  ], notes: 'Gemüse anbraten, Tomaten dazu, Mulden formen, Eier hineingeben und stocken lassen.' },
-  { name: 'Gebratener Reis mit Ei und Gemüse', tags: ['ausgewogen','mit Gemüse'], ingredients: [
-    {name:'Reis gekocht', amount:'400', unit:'g'}, {name:'Eier', amount:'2', unit:''},
-    {name:'Erbsen', amount:'100', unit:'g'}, {name:'Karotte', amount:'1', unit:''},
-    {name:'Sojasauce', amount:'2', unit:'EL'}
-  ], notes: 'Reis vom Vortag scharf anbraten, Gemüse und Ei unterheben, mit Sojasauce würzen.' },
-  { name: 'Falafel mit Salat', tags: ['vegan','proteinreich','mit Gemüse'], ingredients: [
-    {name:'Kichererbsen', amount:'1', unit:'Dose'}, {name:'Petersilie', amount:'1', unit:'Bund'},
-    {name:'Knoblauch', amount:'2', unit:'Zehen'}, {name:'Salat', amount:'1', unit:'Kopf'},
-    {name:'Joghurt', amount:'150', unit:'g'}
-  ], notes: 'Kichererbsen mit Kräutern und Knoblauch pürieren, Bällchen formen und braten.' }
-];
 
 // ---------- Zustand ----------
 
@@ -150,11 +56,6 @@ function shareFilesSupported(){
   return !!(navigator.canShare && navigator.share && photoFile && navigator.canShare({ files: [photoFile] }));
 }
 
-function uid(){ return 'id-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,8); }
-
-function escapeHtml(s){
-  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-}
 
 function fmtTime(d){
   if(!d) return '-';
@@ -194,7 +95,6 @@ function onStoreChange(key, value){
   receivedKeys.add(key);
   if(!ready && DATA_KEYS.every(k => receivedKeys.has(k))){
     ready = true;
-    ensureSeedRecipes();
   }
   lastSync = new Date();
   scheduleRender();
@@ -205,21 +105,6 @@ function onStoreStatus(msg){
   scheduleRender();
 }
 
-// Starter-Rezepte nur ein einziges Mal pro Haushalt einspielen; bestehende Daten
-// werden nie überschrieben (Datensicherheits-Prinzip).
-async function ensureSeedRecipes(){
-  if(meta && meta.seededV1) return;
-  if(recipes.length === 0){
-    recipes = await mutateShared('recipes', [], (list) => {
-      if(list.length === 0){
-        return STARTER_RECIPES.map(r => ({ id: uid(), name:r.name, tags:r.tags, ingredients:r.ingredients, notes:r.notes }));
-      }
-      return list;
-    });
-  }
-  meta = await mutateShared('meta', meta || {}, (m) => { m = m || {}; m.seededV1 = true; return m; });
-  scheduleRender();
-}
 
 // ---------- Fachlogik ----------
 
@@ -259,82 +144,6 @@ function availabilityBadge(recipe){
   return {cls:'partial', text: have + ' von ' + total + ' vorrätig'};
 }
 
-// Zerlegt eine Zutaten-/Artikelzeile in Bezeichnung, Menge und Einheit. Erkennt die
-// Menge sowohl am Anfang ("200 g Mehl", "200g Mehl") als auch am Ende ("Mehl 200 g",
-// "Mehl 200g", "Karotten 2"). Unterstützt Ziffern, Dezimalzahlen (1,5 / 1.5),
-// Brüche (1/2) und Unicode-Brüche (½). Die Einheit darf direkt ankleben.
-const FRACTION_MAP = { '½':'0.5','¼':'0.25','¾':'0.75','⅓':'1/3','⅔':'2/3','⅛':'0.125','⅜':'0.375' };
-const AMOUNT_RE = '(?:[½¼¾⅓⅔⅛⅜]|\\d+(?:[.,]\\d+)?(?:\\s*\\/\\s*\\d+)?)';
-
-function normalizeAmount(a){
-  return FRACTION_MAP[a] || a.replace(/\s+/g,'');
-}
-
-// Entfernt führende Aufzählungszeichen und umschließende Trennzeichen aus dem Namen.
-function cleanIngredientName(s){
-  return String(s || '').replace(/^[\s:–—\-•·▪◦‣*]+/,'').replace(/[\s:–—\-]+$/,'').trim();
-}
-
-function isKnownUnitWord(w){
-  return !!w && KNOWN_UNITS.includes(w.toLowerCase().replace(/\.+$/,''));
-}
-
-function parseIngredientLine(line){
-  let raw = String(line || '').trim();
-  if(!raw) return null;
-  // Führende Aufzählungszeichen entfernen ("• ", "- ", "* ", "– " usw.).
-  raw = raw.replace(/^[•·▪◦‣*\-–—]+\s+/, '').trim();
-  if(!raw) return null;
-  // "2x Paprika" / "2 x Paprika" -> "2 Paprika".
-  raw = raw.replace(new RegExp('^(' + AMOUNT_RE + ')\\s*[x×]\\s+', 'i'), '$1 ');
-
-  // A) Menge in Klammern am Ende: "Paprika (2 Stück)".
-  const paren = raw.match(new RegExp('^(.*?)\\s*\\((' + AMOUNT_RE + ')\\s*([A-Za-zÄÖÜäöüß.]*)\\)\\s*$'));
-  if(paren && (paren[3] === '' || isKnownUnitWord(paren[3]))){
-    const name = cleanIngredientName(paren[1]);
-    if(name) return { name, amount: normalizeAmount(paren[2]), unit: paren[3] ? paren[3].replace(/\.+$/,'') : '' };
-  }
-
-  // B) Menge am Anfang der Zeile ("200 g Mehl", "200g Mehl", "1/2 TL Salz").
-  const lead = raw.match(new RegExp('^(' + AMOUNT_RE + ')\\s*(.*)$'));
-  if(lead){
-    let rest = lead[2].replace(/^[\s:–—\-]+/,'');
-    let unit = '';
-    const um = rest.match(/^([A-Za-zÄÖÜäöüß.]+)/);
-    if(um && isKnownUnitWord(um[1])){
-      unit = um[1].replace(/\.+$/,'');
-      rest = rest.slice(um[1].length).replace(/^[\s.:–—\-]+/,'');
-    }
-    const name = cleanIngredientName(rest);
-    if(name) return { name, amount: normalizeAmount(lead[1]), unit };
-    // Nur Zahl/Einheit ohne Namen – dann lieber den Rohtext als Namen behalten.
-    return { name: cleanIngredientName(raw), amount: '', unit: '' };
-  }
-
-  // C) Menge am Ende der Zeile ("Mehl 200 g", "Mehl - 200g", "Karotten 2").
-  const trail = raw.match(new RegExp('^(.*\\S)\\s+(' + AMOUNT_RE + ')\\s*([A-Za-zÄÖÜäöüß.]*)$'));
-  if(trail && (trail[3] === '' || isKnownUnitWord(trail[3]))){
-    const name = cleanIngredientName(trail[1]);
-    if(name) return { name, amount: normalizeAmount(trail[2]), unit: trail[3] ? trail[3].replace(/\.+$/,'') : '' };
-  }
-
-  // D) Keine Menge erkennbar.
-  return { name: cleanIngredientName(raw), amount: '', unit: '' };
-}
-
-// Zerlegt eine bereits eingetragene Zutat nachträglich, falls die Menge noch komplett
-// im Namensfeld steckt (z. B. manuell "200g Mehl" getippt). Eine bereits gesetzte
-// Menge wird nie überschrieben.
-function normalizeIngredient(ing){
-  if(!ing) return ing;
-  const nm = String(ing.name || '').trim();
-  if(!nm || String(ing.amount || '').trim()) return ing;
-  const p = parseIngredientLine(nm);
-  if(p && p.amount){
-    return { name: p.name, amount: p.amount, unit: (ing.unit && ing.unit.trim()) ? ing.unit : p.unit };
-  }
-  return ing;
-}
 
 function itemCategory(item){
   return (item.category && CATEGORIES.includes(item.category)) ? item.category : 'Sonstiges';
@@ -344,116 +153,6 @@ function openShoppingCount(){
   return shopping.filter(s => !s.checked).length;
 }
 
-// ---------- KI-Workflow (Copy-Paste über die Claude-App) ----------
-
-function buildAiPrompt(){
-  const invText = inventory.length
-    ? inventory.map(i => '- ' + i.name + (i.amount ? ' (' + i.amount + (i.unit ? ' ' + i.unit : '') + ')' : '')).join('\n')
-    : '- (aktuell ist nichts eingetragen)';
-  return 'Du bist ein Kochassistent für eine deutschsprachige Küche.\n\n' +
-    '━━━ WICHTIGSTE REGEL – GILT FÜR DIESEN GESAMTEN CHAT, AB JETZT, BEI JEDER EINZELNEN REZEPT-ANTWORT ━━━\n' +
-    'Sobald ich dich (in dieser oder einer späteren Nachricht) nach einem Rezept frage, antwortest du IMMER im ' +
-    '„KOCHMODUS"-FORMAT, direkt als Text hier im Chat (niemals als Datei, Download oder Artefakt), in GENAU ZWEI Teilen ' +
-    'in derselben Nachricht:\n\n' +
-    '① KOCHMODUS-ANSICHT (lesbarer Text, KEIN JSON): Überschrift mit dem Gerichtnamen, dann „Zutaten" als Liste mit ' +
-    'Mengenangaben, danach „Zubereitung" als kurze nummerierte Schritte.\n\n' +
-    '② DATENBLOCK (direkt im Anschluss, klar getrennt): GENAU EIN JSON-Array mit denselben Angaben, exakt in diesem ' +
-    'Format (darf in einem Codeblock stehen):\n' +
-    '[{"name": "Gerichtname", "aufwand": "schnell", "zeit": "ca. 20 Min", "tags": ["nur Werte aus dieser Liste: ' + TAGS.join(', ') + '"], "ingredients": [{"name": "Zutat", "amount": "200", "unit": "g"}], "steps": ["Erster Schritt.", "Zweiter Schritt."], "notes": "Kurzbeschreibung in einem Satz"}]\n\n' +
-    'Diese Zwei-Teile-Regel gilt für JEDE Rezept-Antwort in diesem Chat, auch bei einem zweiten oder dritten Rezept – ' +
-    'nicht vergessen. Ich kopiere später deine GESAMTE Antwort (Kochmodus-Ansicht + JSON zusammen) in meine App; dort ' +
-    'wird automatisch nur der JSON-Teil herausgefiltert, um den lesbaren Teil musst du dich nicht extra kümmern.\n' +
-    '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
-    'Das ist unser aktueller Küchenvorrat – nur die vorhandenen Zutaten, ohne weitere Vorgaben von mir:\n' + invText + '\n\n' +
-    'Antworte auf DIESE Nachricht nur kurz, dass du bereit bist – schlage jetzt noch KEIN Rezept vor. ' +
-    'Ich sage dir in einer der nächsten Nachrichten hier im Chat individuell, worauf ich gerade Lust habe oder was ich kochen möchte ' +
-    '(z. B. eine bestimmte Zutat, ein Gericht, eine Kategorie oder auch einfach „überrasch mich").\n\n' +
-    'Sobald ich dir sage, was ich kochen möchte, schlägst du GENAU 1 passendes Rezept vor (nur wenn ich ausdrücklich mehrere ' +
-    'Vorschläge oder eine Auswahl wünsche, entsprechend mehr) – im oben festgelegten Kochmodus-Format. Das Rezept soll ' +
-    'überwiegend aus dem oben genannten Vorrat bestehen; einzelne zusätzliche Zutaten sind erlaubt (sie werden in der App ' +
-    'als fehlend markiert).\n\n' +
-    'EINHEITEN: Verwende ausschließlich deutsche/metrische Einheiten mit genauen Endmengen – "g", "mg" und "kg" für Gewicht, ' +
-    '"ml" und "l" für Flüssigkeiten, außerdem "EL", "TL", "Stück", "Prise", "Bund", "Dose", "Packung". Niemals cups, ounces, oz, ' +
-    'pounds, lbs oder Fahrenheit. Temperaturen immer in °C. Gib möglichst genaue Mengen an statt nur „nach Geschmack".\n\n' +
-    'ZUBEREITUNG: Im Feld "steps" bzw. im Kochmodus-Abschnitt „Zubereitung" 3 bis 6 kurze Zubereitungsschritte – je ein ' +
-    'Satz, in der Reihenfolge des Kochens. "notes" enthält zusätzlich eine Kurzbeschreibung in einem Satz.';
-}
-
-// ---------- Foto-Erfassung (Copy-Paste über die Claude-App) ----------
-
-function buildPhotoPrompt(){
-  return 'Du hilfst beim Erfassen eines Lebensmitteleinkaufs für eine deutschsprachige Küchenvorrat-App.\n\n' +
-    'Auf dem Foto, das ich dir in dieser Nachricht anhänge, sind eingekaufte Lebensmittel zu sehen. ' +
-    'Erkenne alle eindeutig sichtbaren Produkte. Fasse mehrere gleiche Produkte zu einem Eintrag mit passender Menge zusammen. ' +
-    'Rate nichts, was du nicht erkennen kannst.\n\n' +
-    'Gib für jedes Produkt an:\n' +
-    '- name: kurze deutsche Bezeichnung (z. B. "Vollmilch", "Hähnchenbrust", "Tiefkühl-Erbsen")\n' +
-    '- amount: Anzahl oder Menge falls erkennbar, sonst "1"\n' +
-    '- unit: Einheit falls erkennbar (g, kg, ml, l, Stück, Packung, Dose), sonst ""\n' +
-    '- location: typischer Lagerort, GENAU einer aus dieser Liste: ' + LOCATIONS.join(', ') + '\n' +
-    '- category: GENAU eine aus dieser Liste: ' + CATEGORIES.join(', ') + '\n\n' +
-    'Ordne den Lagerort nach üblicher Aufbewahrung zu: Tiefkühlware in die Gefriertruhe; ' +
-    'Frischware, Fleisch, Fisch und Milchprodukte in den Kühlschrank; haltbare Ware, Konserven und Trockenware in den Vorratsschrank.\n\n' +
-    'Antworte AUSSCHLIESSLICH mit einem JSON-Array in exakt diesem Format, ohne Markdown-Codeblock und ohne Text davor oder danach:\n' +
-    '[{"name": "Vollmilch", "amount": "1", "unit": "l", "location": "Kühlschrank", "category": "Milchprodukte"}]';
-}
-
-function parsePhotoItems(raw){
-  const clean = raw.replace(/```json|```/g, '').trim();
-  let jsonText = clean;
-  const start = clean.indexOf('[');
-  const end = clean.lastIndexOf(']');
-  if(start >= 0 && end > start){
-    jsonText = clean.slice(start, end + 1);
-  } else {
-    const os = clean.indexOf('{'); const oe = clean.lastIndexOf('}');
-    if(os >= 0 && oe > os) jsonText = '[' + clean.slice(os, oe + 1) + ']';
-  }
-  const parsed = JSON.parse(jsonText);
-  const arr = Array.isArray(parsed) ? parsed : [parsed];
-  const result = arr
-    .filter(r => r && typeof r.name === 'string' && r.name.trim())
-    .map(r => ({
-      id: uid(),
-      name: String(r.name).trim(),
-      amount: String(r.amount || '1').trim() || '1',
-      unit: String(r.unit || '').trim(),
-      location: LOCATIONS.includes(r.location) ? r.location : 'Vorratsschrank',
-      category: CATEGORIES.includes(r.category) ? r.category : 'Sonstiges'
-    }));
-  if(result.length === 0) throw new Error('keine Produkte erkannt');
-  return result;
-}
-
-function parseAiRecipes(raw){
-  const clean = raw.replace(/```json|```/g, '').trim();
-  let jsonText = clean;
-  const start = clean.indexOf('[');
-  const end = clean.lastIndexOf(']');
-  if(start >= 0 && end > start){
-    jsonText = clean.slice(start, end + 1);
-  } else {
-    const os = clean.indexOf('{'); const oe = clean.lastIndexOf('}');
-    if(os >= 0 && oe > os) jsonText = '[' + clean.slice(os, oe + 1) + ']';
-  }
-  const parsed = JSON.parse(jsonText);
-  const arr = Array.isArray(parsed) ? parsed : [parsed];
-  const result = arr
-    .filter(r => r && typeof r.name === 'string' && r.name.trim())
-    .map(r => ({
-      name: r.name.trim(),
-      aufwand: (String(r.aufwand || '').toLowerCase().startsWith('aufw')) ? 'aufwändig' : 'schnell',
-      zeit: String(r.zeit || '').trim(),
-      tags: (Array.isArray(r.tags) ? r.tags : []).filter(t => TAGS.includes(t)),
-      ingredients: (Array.isArray(r.ingredients) ? r.ingredients : []).map(i => ({
-        name: String(i.name || '').trim(), amount: String(i.amount || ''), unit: String(i.unit || '')
-      })).filter(i => i.name),
-      steps: (Array.isArray(r.steps) ? r.steps : []).map(s => String(s || '').trim()).filter(Boolean),
-      notes: String(r.notes || '')
-    }));
-  if(result.length === 0) throw new Error('keine Rezepte erkannt');
-  return result;
-}
 
 // ---------- Kochmodus ----------
 
@@ -1280,7 +979,7 @@ async function copyToClipboard(text){
 }
 
 async function copyAiPrompt(){
-  const ok = await copyToClipboard(buildAiPrompt());
+  const ok = await copyToClipboard(buildAiPrompt(inventory));
   statusMsg = ok ? 'Prompt kopiert – jetzt in der Claude-App einfügen.' : 'Kopieren nicht möglich – bitte Text manuell markieren.';
   render();
 }
@@ -1353,54 +1052,6 @@ async function sendPhotoToClaude(){
 }
 
 // ---------- Spracheingabe (Web Speech API, komplett im Gerät) ----------
-
-const NUM_WORDS = { 'ein':'1','eine':'1','einen':'1','eins':'1','zwei':'2','drei':'3','vier':'4','fünf':'5','sechs':'6','sieben':'7','acht':'8','neun':'9','zehn':'10','elf':'11','zwölf':'12' };
-const UNIT_WORDS = { 'kilo':'kg','kilos':'kg','kilogramm':'kg','gramm':'g','liter':'l','milliliter':'ml','dose':'Dose','dosen':'Dosen','packung':'Packung','packungen':'Packungen','stück':'Stück','stücke':'Stück','flasche':'Flasche','flaschen':'Flaschen','becher':'Becher','glas':'Glas','gläser':'Gläser','bund':'Bund','tüte':'Tüte','tüten':'Tüten' };
-
-function normalizeSpokenLine(line){
-  const words = line.trim().split(/\s+/).filter(Boolean).map((w, i) => {
-    const lw = w.toLowerCase().replace(/[.,;:!?]+$/,'');
-    if(i === 0 && NUM_WORDS[lw]) return NUM_WORDS[lw];
-    if(UNIT_WORDS[lw]) return UNIT_WORDS[lw];
-    return w;
-  });
-  return words.join(' ').trim();
-}
-
-// Erkennt, ob ein Wort eine Mengenangabe ist (Ziffer oder Zahlwort) – dient als
-// Startsignal für einen neuen Artikel innerhalb eines pausenlosen Satzes.
-function isQuantityToken(t){
-  const lw = t.toLowerCase().replace(/[.,;:!?]+$/,'');
-  return /^\d+([.,]\d+)?$/.test(lw) || Object.prototype.hasOwnProperty.call(NUM_WORDS, lw);
-}
-
-// Trennt eine pausenlose Phrase vor jeder Mengenangabe auf, z. B.
-// „zwei Kilo Kartoffeln drei Dosen Kichererbsen" -> ["zwei Kilo Kartoffeln", "drei Dosen Kichererbsen"].
-function splitBeforeQuantities(phrase){
-  const tokens = phrase.trim().split(/\s+/).filter(Boolean);
-  const lines = [];
-  let cur = [];
-  tokens.forEach((t, i) => {
-    if(i > 0 && cur.length && isQuantityToken(t)){
-      lines.push(cur.join(' '));
-      cur = [t];
-    } else {
-      cur.push(t);
-    }
-  });
-  if(cur.length) lines.push(cur.join(' '));
-  return lines;
-}
-
-// Wandelt den erkannten Sprachtext in einzelne Artikelzeilen um. Getrennt wird an
-// drei Signalen: Sprechpausen (Zeilenumbrüche aus den Erkennungs-Abschnitten),
-// Satzzeichen/Bindewörter und Mengenangaben mitten im Satz.
-function spokenToLines(text){
-  const coarse = text.split(/\s*[\n,;]\s*|\s+und\s+|\s+sowie\s+/i).map(s => s.trim()).filter(Boolean);
-  const out = [];
-  coarse.forEach(part => splitBeforeQuantities(part).forEach(l => { if(l.trim()) out.push(l.trim()); }));
-  return out.map(normalizeSpokenLine).filter(Boolean);
-}
 
 // Ein erkannter Sprech-Abschnitt (eine Äußerung) wird zu einer oder mehreren
 // Artikelzeilen und live ans Erfassungsfeld angehängt.
@@ -1791,7 +1442,6 @@ async function boot(){
   if(storeMode() === 'lokal' && !ready){
     // Lokaler Modus liefert alle Keys synchron; falls Speicher leer war, sind wir trotzdem startklar.
     ready = true;
-    ensureSeedRecipes();
     render();
   }
 }
