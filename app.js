@@ -2,108 +2,24 @@
 // UI-Logik, portiert vom Claude-Artifact (referenz/kuechenvorrat-artifact.html),
 // Datenzugriff über store.js (Firestore-Echtzeit-Sync bzw. lokaler Fallback).
 
-import { initStore, mutate, storeMode, DATA_KEYS } from './store.js';
+import { initStore, mutate, storeMode, readKey, writeKey, deleteKey, DATA_KEYS } from './store.js';
+import { LOCATIONS, CATEGORIES, TAGS, DAYS } from './constants.js';
+import { uid, escapeHtml } from './util.js';
+import { parseIngredientLine, normalizeIngredient } from './parse.js';
+import { buildAiPrompt, buildPhotoPrompt, parseAiRecipes, parsePhotoItems } from './ai.js';
+import { spokenToLines } from './voice.js';
+import { evaluateIngredient, evaluateRecipe, normKey, DEFAULT_STAPLES } from './matching.js';
+import { recipeCardHtml, recipeDetailHtml, editorHtml, cookSheetHtml } from './recipes-ui.js';
+import { planDeduction, defaultOn, applyDeduction, revertDeduction } from './cook.js';
+import { mergeNeeds, needsOfEvaluation } from './shopping.js';
+import { parseImportFile, normalizeIgRecipe, pickNew, makeBatch, nextBatch, planUndo, applyUndo, markUsed } from './ig-import.js';
+import { resizeToDataUrl } from './images.js';
+import {
+  parseAmount, canonicalUnit, isItemUnit, stepFor, formatQuantity, addAmounts,
+  suggestPackSize, UNIT_OPTIONS
+} from './units.js';
 
-const LOCATIONS = ['Gefriertruhe', 'Vorratsschrank', 'Kühlschrank'];
-const CATEGORIES = ['Fleisch & Fisch','Gemüse & Obst','Milchprodukte','Fertiggerichte','Grundnahrungsmittel','Konserven','Gewürze & Saucen','Backwaren','Getränke','Sonstiges'];
-const TAGS = ['proteinreich','fettarm','ausgewogen','vegan','fleischlastig','mit Gemüse','ohne Gemüse'];
-const DAYS = ['Montag','Dienstag','Mittwoch','Donnerstag','Freitag','Samstag','Sonntag'];
-const KNOWN_UNITS = ['g','kg','mg','ml','l','tl','el','stk','stück','dose','dosen','packung','päckchen','pck','prise','bund','zehe','zehen','stange','stangen','scheibe','scheiben','becher','glas','gläser','flasche','flaschen','tasse','tassen','kopf','köpfe','tüte','tüten','msp','messerspitze','esslöffel','teelöffel','liter','gramm','kilogramm','milliliter','blatt','blätter','zweig','zweige','handvoll','portion','portionen','würfel','riegel','tropfen'];
 const HOUSEHOLD_LS_KEY = 'vorrat-household';
-
-const STARTER_RECIPES = [
-  { name: 'Spaghetti Bolognese', tags: ['fleischlastig','mit Gemüse'], ingredients: [
-    {name:'Spaghetti', amount:'250', unit:'g'}, {name:'Hackfleisch', amount:'400', unit:'g'},
-    {name:'Zwiebel', amount:'1', unit:''}, {name:'Karotte', amount:'1', unit:''},
-    {name:'Tomaten passiert', amount:'400', unit:'g'}, {name:'Knoblauch', amount:'2', unit:'Zehen'}
-  ], notes: 'Gemüse klein würfeln, Hackfleisch anbraten, mit Tomaten ablöschen, 20 Min köcheln.' },
-  { name: 'Linsensuppe', tags: ['vegan','proteinreich','ausgewogen'], ingredients: [
-    {name:'rote Linsen', amount:'250', unit:'g'}, {name:'Karotte', amount:'2', unit:''},
-    {name:'Kartoffel', amount:'2', unit:''}, {name:'Zwiebel', amount:'1', unit:''},
-    {name:'Gemüsebrühe', amount:'1', unit:'l'}
-  ], notes: 'Gemüse würfeln, mit Linsen und Brühe 20 Min köcheln, pürieren nach Belieben.' },
-  { name: 'Gemüsepfanne mit Reis', tags: ['vegan','mit Gemüse','fettarm'], ingredients: [
-    {name:'Reis', amount:'200', unit:'g'}, {name:'Paprika', amount:'2', unit:''},
-    {name:'Zucchini', amount:'1', unit:''}, {name:'Sojasauce', amount:'2', unit:'EL'},
-    {name:'Ingwer', amount:'1', unit:'Stück'}
-  ], notes: 'Reis kochen, Gemüse scharf anbraten, mit Sojasauce abschmecken.' },
-  { name: 'Kartoffelgratin', tags: ['ausgewogen','mit Gemüse'], ingredients: [
-    {name:'Kartoffeln', amount:'1', unit:'kg'}, {name:'Sahne', amount:'200', unit:'ml'},
-    {name:'Käse gerieben', amount:'150', unit:'g'}, {name:'Knoblauch', amount:'1', unit:'Zehe'}
-  ], notes: 'Kartoffeln in Scheiben schichten, mit Sahne übergießen, Käse drauf, 45 Min überbacken.' },
-  { name: 'Hähnchen-Curry mit Reis', tags: ['fleischlastig','proteinreich','mit Gemüse'], ingredients: [
-    {name:'Hähnchenbrust', amount:'400', unit:'g'}, {name:'Kokosmilch', amount:'400', unit:'ml'},
-    {name:'Currypaste', amount:'2', unit:'EL'}, {name:'Paprika', amount:'1', unit:''},
-    {name:'Reis', amount:'200', unit:'g'}
-  ], notes: 'Hähnchen anbraten, Currypaste und Kokosmilch dazu, mit Gemüse 15 Min köcheln.' },
-  { name: 'Chili sin Carne', tags: ['vegan','proteinreich','mit Gemüse'], ingredients: [
-    {name:'Kidneybohnen', amount:'1', unit:'Dose'}, {name:'Mais', amount:'1', unit:'Dose'},
-    {name:'Tomaten stückig', amount:'400', unit:'g'}, {name:'Zwiebel', amount:'1', unit:''},
-    {name:'Paprika', amount:'1', unit:''}
-  ], notes: 'Zwiebel anbraten, restliche Zutaten dazu, 20 Min köcheln lassen.' },
-  { name: 'Bunter Nudelsalat', tags: ['ausgewogen','mit Gemüse','fettarm'], ingredients: [
-    {name:'Nudeln', amount:'250', unit:'g'}, {name:'Cherrytomaten', amount:'150', unit:'g'},
-    {name:'Gurke', amount:'1', unit:''}, {name:'Feta', amount:'100', unit:'g'},
-    {name:'Olivenöl', amount:'2', unit:'EL'}
-  ], notes: 'Nudeln kochen, abkühlen lassen, mit Gemüse und Feta mischen.' },
-  { name: 'Kichererbsen-Curry', tags: ['vegan','proteinreich','mit Gemüse'], ingredients: [
-    {name:'Kichererbsen', amount:'1', unit:'Dose'}, {name:'Kokosmilch', amount:'400', unit:'ml'},
-    {name:'Spinat', amount:'200', unit:'g'}, {name:'Currypulver', amount:'1', unit:'EL'},
-    {name:'Zwiebel', amount:'1', unit:''}
-  ], notes: 'Zwiebel andünsten, Currypulver kurz mitrösten, restliche Zutaten dazugeben, 15 Min köcheln.' },
-  { name: 'Rührei mit Gemüse', tags: ['proteinreich','ausgewogen','mit Gemüse'], ingredients: [
-    {name:'Eier', amount:'4', unit:''}, {name:'Paprika', amount:'1', unit:''},
-    {name:'Champignons', amount:'150', unit:'g'}, {name:'Schnittlauch', amount:'1', unit:'Bund'}
-  ], notes: 'Gemüse anbraten, verquirlte Eier dazugeben, unter Rühren stocken lassen.' },
-  { name: 'Ofengemüse mit Feta', tags: ['ausgewogen','mit Gemüse','fettarm'], ingredients: [
-    {name:'Zucchini', amount:'1', unit:''}, {name:'Paprika', amount:'2', unit:''},
-    {name:'rote Zwiebel', amount:'1', unit:''}, {name:'Feta', amount:'150', unit:'g'},
-    {name:'Olivenöl', amount:'2', unit:'EL'}
-  ], notes: 'Gemüse in Stücke schneiden, mit Öl vermengen, 25 Min bei 200 Grad backen, Feta darüberbröseln.' },
-  { name: 'Linsen-Bolognese vegan', tags: ['vegan','proteinreich','mit Gemüse'], ingredients: [
-    {name:'braune Linsen', amount:'200', unit:'g'}, {name:'Tomaten passiert', amount:'400', unit:'g'},
-    {name:'Karotte', amount:'1', unit:''}, {name:'Zwiebel', amount:'1', unit:''},
-    {name:'Spaghetti', amount:'250', unit:'g'}
-  ], notes: 'Linsen mit Gemüse und Tomaten 25 Min köcheln, mit Nudeln servieren.' },
-  { name: 'Hähnchenbrust mit Brokkoli', tags: ['proteinreich','fettarm','mit Gemüse'], ingredients: [
-    {name:'Hähnchenbrust', amount:'400', unit:'g'}, {name:'Brokkoli', amount:'1', unit:''},
-    {name:'Reis', amount:'150', unit:'g'}, {name:'Sojasauce', amount:'1', unit:'EL'}
-  ], notes: 'Hähnchen würzen und braten, Brokkoli dämpfen, mit Reis anrichten.' },
-  { name: 'Kartoffelsuppe', tags: ['ausgewogen','fettarm'], ingredients: [
-    {name:'Kartoffeln', amount:'800', unit:'g'}, {name:'Karotte', amount:'2', unit:''},
-    {name:'Lauch', amount:'1', unit:''}, {name:'Gemüsebrühe', amount:'1', unit:'l'}
-  ], notes: 'Gemüse würfeln, in Brühe weich kochen, teilweise pürieren.' },
-  { name: 'Gemüseeintopf', tags: ['vegan','ausgewogen','mit Gemüse','fettarm'], ingredients: [
-    {name:'Kartoffeln', amount:'3', unit:''}, {name:'Karotte', amount:'2', unit:''},
-    {name:'Sellerie', amount:'1', unit:'Stange'}, {name:'Erbsen', amount:'150', unit:'g'},
-    {name:'Gemüsebrühe', amount:'1', unit:'l'}
-  ], notes: 'Alles klein schneiden, in Brühe 25 Min köcheln.' },
-  { name: 'Herzhafte Pfannkuchen', tags: ['ausgewogen','ohne Gemüse'], ingredients: [
-    {name:'Mehl', amount:'200', unit:'g'}, {name:'Milch', amount:'300', unit:'ml'},
-    {name:'Eier', amount:'2', unit:''}, {name:'Schinken', amount:'100', unit:'g'},
-    {name:'Käse gerieben', amount:'80', unit:'g'}
-  ], notes: 'Teig anrühren, dünn ausbacken, mit Schinken und Käse füllen.' },
-  { name: 'Thunfischsalat', tags: ['proteinreich','fettarm','mit Gemüse'], ingredients: [
-    {name:'Thunfisch', amount:'1', unit:'Dose'}, {name:'Tomaten', amount:'2', unit:''},
-    {name:'rote Zwiebel', amount:'1', unit:''}, {name:'Mais', amount:'1', unit:'Dose'},
-    {name:'Olivenöl', amount:'1', unit:'EL'}
-  ], notes: 'Alle Zutaten würfeln bzw. abtropfen lassen und vermengen.' },
-  { name: 'Shakshuka', tags: ['proteinreich','mit Gemüse'], ingredients: [
-    {name:'Eier', amount:'4', unit:''}, {name:'Tomaten stückig', amount:'400', unit:'g'},
-    {name:'Paprika', amount:'1', unit:''}, {name:'Zwiebel', amount:'1', unit:''},
-    {name:'Kreuzkümmel', amount:'1', unit:'TL'}
-  ], notes: 'Gemüse anbraten, Tomaten dazu, Mulden formen, Eier hineingeben und stocken lassen.' },
-  { name: 'Gebratener Reis mit Ei und Gemüse', tags: ['ausgewogen','mit Gemüse'], ingredients: [
-    {name:'Reis gekocht', amount:'400', unit:'g'}, {name:'Eier', amount:'2', unit:''},
-    {name:'Erbsen', amount:'100', unit:'g'}, {name:'Karotte', amount:'1', unit:''},
-    {name:'Sojasauce', amount:'2', unit:'EL'}
-  ], notes: 'Reis vom Vortag scharf anbraten, Gemüse und Ei unterheben, mit Sojasauce würzen.' },
-  { name: 'Falafel mit Salat', tags: ['vegan','proteinreich','mit Gemüse'], ingredients: [
-    {name:'Kichererbsen', amount:'1', unit:'Dose'}, {name:'Petersilie', amount:'1', unit:'Bund'},
-    {name:'Knoblauch', amount:'2', unit:'Zehen'}, {name:'Salat', amount:'1', unit:'Kopf'},
-    {name:'Joghurt', amount:'150', unit:'g'}
-  ], notes: 'Kichererbsen mit Kräutern und Knoblauch pürieren, Bällchen formen und braten.' }
-];
 
 // ---------- Zustand ----------
 
@@ -121,9 +37,15 @@ let online = navigator.onLine;
 let pendingRender = false;
 let collapsedCats = new Set();
 
-let draftName = '', draftNotes = '';
-let draftTags = [];
-let draftIngredients = [];
+let recipeSearch = '', recipeCatFilter = 'alle', recipeShown = 24;
+let viewRecipeId = null, viewPortions = 2, portionsFor = null, aliasFor = null;
+let cookPortions = 2;
+let editing = null;
+let cookSheet = null;
+let settingsOpen = false;
+let aiDetailsOpen = false;
+let igStatus = '';
+let igUndoConfirm = false;
 let aiPasteOpen = false;
 let aiSuggestions = null;
 let aiError = '';
@@ -150,11 +72,6 @@ function shareFilesSupported(){
   return !!(navigator.canShare && navigator.share && photoFile && navigator.canShare({ files: [photoFile] }));
 }
 
-function uid(){ return 'id-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,8); }
-
-function escapeHtml(s){
-  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-}
 
 function fmtTime(d){
   if(!d) return '-';
@@ -192,11 +109,12 @@ function onStoreChange(key, value){
   if(key === 'shopping' && value !== null) shopping = value;
   if(key === 'meta' && value !== null) meta = value;
   receivedKeys.add(key);
+  lastSync = new Date();
   if(!ready && DATA_KEYS.every(k => receivedKeys.has(k))){
     ready = true;
-    ensureSeedRecipes();
+    routeFromHash();
+    return;
   }
-  lastSync = new Date();
   scheduleRender();
 }
 
@@ -205,35 +123,34 @@ function onStoreStatus(msg){
   scheduleRender();
 }
 
-// Starter-Rezepte nur ein einziges Mal pro Haushalt einspielen; bestehende Daten
-// werden nie überschrieben (Datensicherheits-Prinzip).
-async function ensureSeedRecipes(){
-  if(meta && meta.seededV1) return;
-  if(recipes.length === 0){
-    recipes = await mutateShared('recipes', [], (list) => {
-      if(list.length === 0){
-        return STARTER_RECIPES.map(r => ({ id: uid(), name:r.name, tags:r.tags, ingredients:r.ingredients, notes:r.notes }));
-      }
-      return list;
-    });
-  }
-  meta = await mutateShared('meta', meta || {}, (m) => { m = m || {}; m.seededV1 = true; return m; });
-  scheduleRender();
-}
 
 // ---------- Fachlogik ----------
 
-function ingredientAvailable(ingName){
-  const q = ingName.trim().toLowerCase();
-  if(!q) return false;
-  return inventory.some(item => {
-    const n = item.name.trim().toLowerCase();
-    return n.includes(q) || q.includes(n);
-  });
+// Abgleich-Kontext: Grundvorrat und gelernte Aliase aus den Einstellungen (meta).
+function matchCtx(){
+  return {
+    staples: (meta && Array.isArray(meta.staples)) ? meta.staples : DEFAULT_STAPLES,
+    aliases: (meta && meta.aliases) || {}
+  };
 }
 
-function missingIngredients(recipe){
-  return recipe.ingredients.filter(ing => !ingredientAvailable(ing.name));
+// Bewertung der Zutaten eines Rezepts gegen den Vorrat. Der Cache gilt nur für einen
+// Render-Durchlauf (render() leert ihn), damit er nie veraltete Daten zeigt.
+const evalCache = new Map();
+function evalRecipe(r, factor = 1){
+  const key = r.id + '|' + factor;
+  let ev = evalCache.get(key);
+  if(!ev){ ev = evaluateRecipe(r, inventory, matchCtx(), factor); evalCache.set(key, ev); }
+  return ev;
+}
+
+function ingredientAvailable(name){
+  return evaluateIngredient({ name }, inventory, matchCtx()).status !== 'fehlt';
+}
+
+function recipeCategories(){
+  const list = meta && Array.isArray(meta.recipeCategories) && meta.recipeCategories.length ? meta.recipeCategories : null;
+  return list || ['süß', 'deftig'];
 }
 
 // Liefert die Zubereitungsschritte eines Rezepts. Neue KI-Rezepte haben ein "steps"-Feld;
@@ -249,218 +166,135 @@ function recipeSteps(r){
     .map(s => /[.!?]$/.test(s) ? s : s + '.');
 }
 
-function availabilityBadge(recipe){
-  const total = recipe.ingredients.length;
-  if(total === 0) return {cls:'partial', text:'keine Zutaten hinterlegt'};
-  const missing = missingIngredients(recipe).length;
-  const have = total - missing;
-  if(missing === 0) return {cls:'full', text: 'alles da'};
-  if(have === 0) return {cls:'none', text: have + ' von ' + total + ' vorrätig'};
-  return {cls:'partial', text: have + ' von ' + total + ' vorrätig'};
+// Titelbild eines Rezepts (Data-URL) oder null, solange es nicht geladen ist.
+const imageCache = new Map();
+const imageLoading = new Set();
+function getImage(r){
+  return imageCache.get(r.id) || null;
 }
 
-// Zerlegt eine Zutaten-/Artikelzeile in Bezeichnung, Menge und Einheit. Erkennt die
-// Menge sowohl am Anfang ("200 g Mehl", "200g Mehl") als auch am Ende ("Mehl 200 g",
-// "Mehl 200g", "Karotten 2"). Unterstützt Ziffern, Dezimalzahlen (1,5 / 1.5),
-// Brüche (1/2) und Unicode-Brüche (½). Die Einheit darf direkt ankleben.
-const FRACTION_MAP = { '½':'0.5','¼':'0.25','¾':'0.75','⅓':'1/3','⅔':'2/3','⅛':'0.125','⅜':'0.375' };
-const AMOUNT_RE = '(?:[½¼¾⅓⅔⅛⅜]|\\d+(?:[.,]\\d+)?(?:\\s*\\/\\s*\\d+)?)';
-
-function normalizeAmount(a){
-  return FRACTION_MAP[a] || a.replace(/\s+/g,'');
-}
-
-// Entfernt führende Aufzählungszeichen und umschließende Trennzeichen aus dem Namen.
-function cleanIngredientName(s){
-  return String(s || '').replace(/^[\s:–—\-•·▪◦‣*]+/,'').replace(/[\s:–—\-]+$/,'').trim();
-}
-
-function isKnownUnitWord(w){
-  return !!w && KNOWN_UNITS.includes(w.toLowerCase().replace(/\.+$/,''));
-}
-
-function parseIngredientLine(line){
-  let raw = String(line || '').trim();
-  if(!raw) return null;
-  // Führende Aufzählungszeichen entfernen ("• ", "- ", "* ", "– " usw.).
-  raw = raw.replace(/^[•·▪◦‣*\-–—]+\s+/, '').trim();
-  if(!raw) return null;
-  // "2x Paprika" / "2 x Paprika" -> "2 Paprika".
-  raw = raw.replace(new RegExp('^(' + AMOUNT_RE + ')\\s*[x×]\\s+', 'i'), '$1 ');
-
-  // A) Menge in Klammern am Ende: "Paprika (2 Stück)".
-  const paren = raw.match(new RegExp('^(.*?)\\s*\\((' + AMOUNT_RE + ')\\s*([A-Za-zÄÖÜäöüß.]*)\\)\\s*$'));
-  if(paren && (paren[3] === '' || isKnownUnitWord(paren[3]))){
-    const name = cleanIngredientName(paren[1]);
-    if(name) return { name, amount: normalizeAmount(paren[2]), unit: paren[3] ? paren[3].replace(/\.+$/,'') : '' };
-  }
-
-  // B) Menge am Anfang der Zeile ("200 g Mehl", "200g Mehl", "1/2 TL Salz").
-  const lead = raw.match(new RegExp('^(' + AMOUNT_RE + ')\\s*(.*)$'));
-  if(lead){
-    let rest = lead[2].replace(/^[\s:–—\-]+/,'');
-    let unit = '';
-    const um = rest.match(/^([A-Za-zÄÖÜäöüß.]+)/);
-    if(um && isKnownUnitWord(um[1])){
-      unit = um[1].replace(/\.+$/,'');
-      rest = rest.slice(um[1].length).replace(/^[\s.:–—\-]+/,'');
+function applyImageToDom(id, url){
+  document.querySelectorAll('[data-img-for="' + CSS.escape(id) + '"]').forEach(el => {
+    const ph = el.querySelector('.ph');
+    if(ph) ph.remove();
+    if(!el.querySelector('img')){
+      const img = document.createElement('img');
+      img.src = url;
+      img.alt = '';
+      el.prepend(img);
     }
-    const name = cleanIngredientName(rest);
-    if(name) return { name, amount: normalizeAmount(lead[1]), unit };
-    // Nur Zahl/Einheit ohne Namen – dann lieber den Rohtext als Namen behalten.
-    return { name: cleanIngredientName(raw), amount: '', unit: '' };
-  }
-
-  // C) Menge am Ende der Zeile ("Mehl 200 g", "Mehl - 200g", "Karotten 2").
-  const trail = raw.match(new RegExp('^(.*\\S)\\s+(' + AMOUNT_RE + ')\\s*([A-Za-zÄÖÜäöüß.]*)$'));
-  if(trail && (trail[3] === '' || isKnownUnitWord(trail[3]))){
-    const name = cleanIngredientName(trail[1]);
-    if(name) return { name, amount: normalizeAmount(trail[2]), unit: trail[3] ? trail[3].replace(/\.+$/,'') : '' };
-  }
-
-  // D) Keine Menge erkennbar.
-  return { name: cleanIngredientName(raw), amount: '', unit: '' };
+  });
 }
 
-// Zerlegt eine bereits eingetragene Zutat nachträglich, falls die Menge noch komplett
-// im Namensfeld steckt (z. B. manuell "200g Mehl" getippt). Eine bereits gesetzte
-// Menge wird nie überschrieben.
-function normalizeIngredient(ing){
-  if(!ing) return ing;
-  const nm = String(ing.name || '').trim();
-  if(!nm || String(ing.amount || '').trim()) return ing;
-  const p = parseIngredientLine(nm);
-  if(p && p.amount){
-    return { name: p.name, amount: p.amount, unit: (ing.unit && ing.unit.trim()) ? ing.unit : p.unit };
-  }
-  return ing;
+// Lädt das Titelbild eines Rezepts aus der Datenbank (Dokument "img-<id>") und setzt es ein.
+async function loadImage(id){
+  if(imageCache.has(id) || imageLoading.has(id)) return;
+  imageLoading.add(id);
+  const v = await readKey('img-' + id, null);
+  imageLoading.delete(id);
+  const url = v && v.dataUrl ? v.dataUrl : '';
+  imageCache.set(id, url);
+  if(url) applyImageToDom(id, url);
 }
+
+// Lädt die Bilder aller aktuell sichtbaren Karten bzw. des Detail-Titelbilds nach.
+function loadVisibleImages(){
+  document.querySelectorAll('[data-img-for]').forEach(el => {
+    const id = el.dataset.imgFor;
+    const r = recipes.find(x => x.id === id);
+    if(r && r.hasImage) loadImage(id);
+  });
+}
+
+// ---------- Navigation (Hash-Routen, damit die Zurück-Taste funktioniert) ----------
+
+function go(hash){
+  if(location.hash === hash || (hash === '' && !location.hash)) routeFromHash();
+  else location.hash = hash;
+}
+
+function goReplace(hash){
+  location.replace(hash || '#');
+}
+
+function goBack(){
+  if(history.length > 1) history.back();
+  else go('');
+}
+
+function routeFromHash(){
+  const parts = location.hash.replace(/^#\/?/, '').split('/').map(decodeURIComponent);
+  const [a, id, sub] = parts;
+  viewRecipeId = null; cookingRecipeId = null; editing = null; cookSheet = null; settingsOpen = false; aliasFor = null; igUndoConfirm = false;
+  if(a === 'rezept' && id){
+    viewRecipeId = id;
+    const r = recipes.find(x => x.id === id);
+    if(portionsFor !== id){ viewPortions = (r && r.servings) || 2; portionsFor = id; }
+    if(sub === 'kochen'){
+      cookingRecipeId = id;
+      cookPortions = viewPortions;
+      cookChecked = new Set();
+      cookStepsDone = new Set();
+    } else if(sub === 'bearbeiten'){
+      beginEdit(id);
+    } else if(sub === 'gekocht'){
+      cookSheet = { recipeId: id, portions: viewPortions, on: {} };
+    }
+  } else if(a === 'neu'){
+    beginEdit(null);
+  } else if(a === 'einstellungen'){
+    settingsOpen = true;
+  }
+  if(cookingRecipeId) requestWakeLock(); else releaseWakeLock();
+  window.scrollTo(0, 0);
+  if(ready) render();
+}
+
 
 function itemCategory(item){
   return (item.category && CATEGORIES.includes(item.category)) ? item.category : 'Sonstiges';
+}
+
+// Packungsgröße für einen Artikelnamen: zuerst die gemerkte (meta.packSizes), sonst ein
+// üblicher Vorschlag, sonst nichts. Rückgabe {size, unit} oder null.
+function packHint(name){
+  const key = String(name || '').trim().toLowerCase();
+  const saved = meta && meta.packSizes && meta.packSizes[key];
+  if(saved && saved.size) return saved;
+  return suggestPackSize(name);
+}
+
+// Ergänzt einen neuen Vorratsartikel um die Packungsgröße, wenn die Einheit ein Gebinde ist.
+function withPackSize(item){
+  if(!isItemUnit(item.unit) || item.packSize) return item;
+  const hint = packHint(item.name);
+  return hint ? { ...item, packSize: hint.size, packUnit: hint.unit } : item;
+}
+
+function unitSelectOptions(current){
+  const cur = String(current || '').trim();
+  const known = UNIT_OPTIONS.includes(canonicalUnit(cur)) ? canonicalUnit(cur) : null;
+  const opts = ['', ...UNIT_OPTIONS];
+  if(cur && !known) opts.push(cur);
+  const sel = known !== null ? known : cur;
+  return opts.map(u => `<option value="${escapeHtml(u)}" ${u===sel?'selected':''}>${u ? escapeHtml(u) : '(ohne)'}</option>`).join('');
 }
 
 function openShoppingCount(){
   return shopping.filter(s => !s.checked).length;
 }
 
-// ---------- KI-Workflow (Copy-Paste über die Claude-App) ----------
-
-function buildAiPrompt(){
-  const invText = inventory.length
-    ? inventory.map(i => '- ' + i.name + (i.amount ? ' (' + i.amount + (i.unit ? ' ' + i.unit : '') + ')' : '')).join('\n')
-    : '- (aktuell ist nichts eingetragen)';
-  return 'Du bist ein Kochassistent für eine deutschsprachige Küche.\n\n' +
-    '━━━ WICHTIGSTE REGEL – GILT FÜR DIESEN GESAMTEN CHAT, AB JETZT, BEI JEDER EINZELNEN REZEPT-ANTWORT ━━━\n' +
-    'Sobald ich dich (in dieser oder einer späteren Nachricht) nach einem Rezept frage, antwortest du IMMER im ' +
-    '„KOCHMODUS"-FORMAT, direkt als Text hier im Chat (niemals als Datei, Download oder Artefakt), in GENAU ZWEI Teilen ' +
-    'in derselben Nachricht:\n\n' +
-    '① KOCHMODUS-ANSICHT (lesbarer Text, KEIN JSON): Überschrift mit dem Gerichtnamen, dann „Zutaten" als Liste mit ' +
-    'Mengenangaben, danach „Zubereitung" als kurze nummerierte Schritte.\n\n' +
-    '② DATENBLOCK (direkt im Anschluss, klar getrennt): GENAU EIN JSON-Array mit denselben Angaben, exakt in diesem ' +
-    'Format (darf in einem Codeblock stehen):\n' +
-    '[{"name": "Gerichtname", "aufwand": "schnell", "zeit": "ca. 20 Min", "tags": ["nur Werte aus dieser Liste: ' + TAGS.join(', ') + '"], "ingredients": [{"name": "Zutat", "amount": "200", "unit": "g"}], "steps": ["Erster Schritt.", "Zweiter Schritt."], "notes": "Kurzbeschreibung in einem Satz"}]\n\n' +
-    'Diese Zwei-Teile-Regel gilt für JEDE Rezept-Antwort in diesem Chat, auch bei einem zweiten oder dritten Rezept – ' +
-    'nicht vergessen. Ich kopiere später deine GESAMTE Antwort (Kochmodus-Ansicht + JSON zusammen) in meine App; dort ' +
-    'wird automatisch nur der JSON-Teil herausgefiltert, um den lesbaren Teil musst du dich nicht extra kümmern.\n' +
-    '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
-    'Das ist unser aktueller Küchenvorrat – nur die vorhandenen Zutaten, ohne weitere Vorgaben von mir:\n' + invText + '\n\n' +
-    'Antworte auf DIESE Nachricht nur kurz, dass du bereit bist – schlage jetzt noch KEIN Rezept vor. ' +
-    'Ich sage dir in einer der nächsten Nachrichten hier im Chat individuell, worauf ich gerade Lust habe oder was ich kochen möchte ' +
-    '(z. B. eine bestimmte Zutat, ein Gericht, eine Kategorie oder auch einfach „überrasch mich").\n\n' +
-    'Sobald ich dir sage, was ich kochen möchte, schlägst du GENAU 1 passendes Rezept vor (nur wenn ich ausdrücklich mehrere ' +
-    'Vorschläge oder eine Auswahl wünsche, entsprechend mehr) – im oben festgelegten Kochmodus-Format. Das Rezept soll ' +
-    'überwiegend aus dem oben genannten Vorrat bestehen; einzelne zusätzliche Zutaten sind erlaubt (sie werden in der App ' +
-    'als fehlend markiert).\n\n' +
-    'EINHEITEN: Verwende ausschließlich deutsche/metrische Einheiten mit genauen Endmengen – "g", "mg" und "kg" für Gewicht, ' +
-    '"ml" und "l" für Flüssigkeiten, außerdem "EL", "TL", "Stück", "Prise", "Bund", "Dose", "Packung". Niemals cups, ounces, oz, ' +
-    'pounds, lbs oder Fahrenheit. Temperaturen immer in °C. Gib möglichst genaue Mengen an statt nur „nach Geschmack".\n\n' +
-    'ZUBEREITUNG: Im Feld "steps" bzw. im Kochmodus-Abschnitt „Zubereitung" 3 bis 6 kurze Zubereitungsschritte – je ein ' +
-    'Satz, in der Reihenfolge des Kochens. "notes" enthält zusätzlich eine Kurzbeschreibung in einem Satz.';
-}
-
-// ---------- Foto-Erfassung (Copy-Paste über die Claude-App) ----------
-
-function buildPhotoPrompt(){
-  return 'Du hilfst beim Erfassen eines Lebensmitteleinkaufs für eine deutschsprachige Küchenvorrat-App.\n\n' +
-    'Auf dem Foto, das ich dir in dieser Nachricht anhänge, sind eingekaufte Lebensmittel zu sehen. ' +
-    'Erkenne alle eindeutig sichtbaren Produkte. Fasse mehrere gleiche Produkte zu einem Eintrag mit passender Menge zusammen. ' +
-    'Rate nichts, was du nicht erkennen kannst.\n\n' +
-    'Gib für jedes Produkt an:\n' +
-    '- name: kurze deutsche Bezeichnung (z. B. "Vollmilch", "Hähnchenbrust", "Tiefkühl-Erbsen")\n' +
-    '- amount: Anzahl oder Menge falls erkennbar, sonst "1"\n' +
-    '- unit: Einheit falls erkennbar (g, kg, ml, l, Stück, Packung, Dose), sonst ""\n' +
-    '- location: typischer Lagerort, GENAU einer aus dieser Liste: ' + LOCATIONS.join(', ') + '\n' +
-    '- category: GENAU eine aus dieser Liste: ' + CATEGORIES.join(', ') + '\n\n' +
-    'Ordne den Lagerort nach üblicher Aufbewahrung zu: Tiefkühlware in die Gefriertruhe; ' +
-    'Frischware, Fleisch, Fisch und Milchprodukte in den Kühlschrank; haltbare Ware, Konserven und Trockenware in den Vorratsschrank.\n\n' +
-    'Antworte AUSSCHLIESSLICH mit einem JSON-Array in exakt diesem Format, ohne Markdown-Codeblock und ohne Text davor oder danach:\n' +
-    '[{"name": "Vollmilch", "amount": "1", "unit": "l", "location": "Kühlschrank", "category": "Milchprodukte"}]';
-}
-
-function parsePhotoItems(raw){
-  const clean = raw.replace(/```json|```/g, '').trim();
-  let jsonText = clean;
-  const start = clean.indexOf('[');
-  const end = clean.lastIndexOf(']');
-  if(start >= 0 && end > start){
-    jsonText = clean.slice(start, end + 1);
-  } else {
-    const os = clean.indexOf('{'); const oe = clean.lastIndexOf('}');
-    if(os >= 0 && oe > os) jsonText = '[' + clean.slice(os, oe + 1) + ']';
-  }
-  const parsed = JSON.parse(jsonText);
-  const arr = Array.isArray(parsed) ? parsed : [parsed];
-  const result = arr
-    .filter(r => r && typeof r.name === 'string' && r.name.trim())
-    .map(r => ({
-      id: uid(),
-      name: String(r.name).trim(),
-      amount: String(r.amount || '1').trim() || '1',
-      unit: String(r.unit || '').trim(),
-      location: LOCATIONS.includes(r.location) ? r.location : 'Vorratsschrank',
-      category: CATEGORIES.includes(r.category) ? r.category : 'Sonstiges'
-    }));
-  if(result.length === 0) throw new Error('keine Produkte erkannt');
-  return result;
-}
-
-function parseAiRecipes(raw){
-  const clean = raw.replace(/```json|```/g, '').trim();
-  let jsonText = clean;
-  const start = clean.indexOf('[');
-  const end = clean.lastIndexOf(']');
-  if(start >= 0 && end > start){
-    jsonText = clean.slice(start, end + 1);
-  } else {
-    const os = clean.indexOf('{'); const oe = clean.lastIndexOf('}');
-    if(os >= 0 && oe > os) jsonText = '[' + clean.slice(os, oe + 1) + ']';
-  }
-  const parsed = JSON.parse(jsonText);
-  const arr = Array.isArray(parsed) ? parsed : [parsed];
-  const result = arr
-    .filter(r => r && typeof r.name === 'string' && r.name.trim())
-    .map(r => ({
-      name: r.name.trim(),
-      aufwand: (String(r.aufwand || '').toLowerCase().startsWith('aufw')) ? 'aufwändig' : 'schnell',
-      zeit: String(r.zeit || '').trim(),
-      tags: (Array.isArray(r.tags) ? r.tags : []).filter(t => TAGS.includes(t)),
-      ingredients: (Array.isArray(r.ingredients) ? r.ingredients : []).map(i => ({
-        name: String(i.name || '').trim(), amount: String(i.amount || ''), unit: String(i.unit || '')
-      })).filter(i => i.name),
-      steps: (Array.isArray(r.steps) ? r.steps : []).map(s => String(s || '').trim()).filter(Boolean),
-      notes: String(r.notes || '')
-    }));
-  if(result.length === 0) throw new Error('keine Rezepte erkannt');
-  return result;
-}
 
 // ---------- Kochmodus ----------
 
 // Bildschirm während des Kochens anlassen; wird nicht überall unterstützt (dann still ignorieren).
+// Der Browser gibt die Sperre beim App-Wechsel frei, deshalb wird sie bei Rückkehr neu angefordert.
 async function requestWakeLock(){
   try{
-    if(navigator.wakeLock && !wakeLock) wakeLock = await navigator.wakeLock.request('screen');
+    if(navigator.wakeLock && !wakeLock){
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => { wakeLock = null; });
+    }
   }catch(e){ /* nicht unterstützt oder abgelehnt – Kochmodus funktioniert trotzdem */ }
 }
 
@@ -471,36 +305,23 @@ async function releaseWakeLock(){
   wakeLock = null;
 }
 
-function openCookMode(id){
-  cookingRecipeId = id;
-  cookChecked = new Set();
-  cookStepsDone = new Set();
-  requestWakeLock();
-  window.scrollTo(0, 0);
-  render();
-}
-
-function closeCookMode(){
-  cookingRecipeId = null;
-  releaseWakeLock();
-  render();
-}
-
 function renderCookMode(){
   const r = recipes.find(x => x.id === cookingRecipeId);
   if(!r){ cookingRecipeId = null; return ''; }
+  const factor = cookPortions / (r.servings || 2);
+  const ev = evalRecipe(r, factor);
   const effort = r.aufwand ? `<span class="effort-badge">${r.aufwand==='aufwändig'?'aufwändig':'schnell'}${r.zeit?' · '+escapeHtml(r.zeit):''}</span>` : '';
 
-  const ingHtml = r.ingredients.length
-    ? r.ingredients.map((i, idx) => {
+  const ingHtml = ev.rows.length
+    ? ev.rows.map((row, idx) => {
         const done = cookChecked.has(idx);
-        const miss = !ingredientAvailable(i.name);
-        const qty = i.amount ? escapeHtml(String(i.amount)) + (i.unit ? ' ' + escapeHtml(i.unit) : '') : '';
+        const n = parseAmount(row.ing.amount);
+        const qtyText = n === null ? String(row.ing.amount ?? '').trim() : formatQuantity(n * factor, row.ing.unit);
         return `
           <li class="cook-ing ${done?'done':''}" data-action="toggle-cook-ing" data-idx="${idx}">
             <span class="cook-check">${done ? '✓' : ''}</span>
-            <span class="cook-ing-text">${escapeHtml(i.name)}${qty ? ' <span class="cook-qty">'+qty+'</span>' : ''}</span>
-            ${miss ? '<span class="cook-miss">fehlt</span>' : ''}
+            <span class="cook-ing-text">${escapeHtml(row.ing.name)}${qtyText ? ' <span class="cook-qty">'+escapeHtml(qtyText)+'</span>' : ''}</span>
+            ${row.status === 'fehlt' ? '<span class="cook-miss">fehlt</span>' : ''}
           </li>`;
       }).join('')
     : '<li class="empty-note">Keine Zutaten hinterlegt.</li>';
@@ -523,6 +344,11 @@ function renderCookMode(){
         <button class="btn small secondary" data-action="close-cook">← Zurück</button>
         <h1 class="cook-title">${escapeHtml(r.name)}${effort}</h1>
       </div>
+      <div class="cook-portions">
+        <button class="step-btn" data-action="cook-portions-dec" aria-label="Weniger Portionen">−</button>
+        <span class="portions-n">${cookPortions} ${cookPortions === 1 ? 'Portion' : 'Portionen'}</span>
+        <button class="step-btn" data-action="cook-portions-inc" aria-label="Mehr Portionen">+</button>
+      </div>
       <div class="cook-card">
         <h2>Zutaten</h2>
         <div class="cook-hint">Zum Abhaken antippen.</div>
@@ -534,10 +360,242 @@ function renderCookMode(){
         <ol class="cook-steps">${stepsHtml}</ol>
       </div>
       <div class="cook-foot">
+        <button class="btn" data-action="cook-done">✔ Fertig gekocht – Zutaten abbuchen</button>
         <button class="btn secondary" data-action="close-cook">Kochmodus beenden</button>
       </div>
     </div>
   `;
+}
+
+// ---------- Rezept-Detail, Editor, Einstellungen ----------
+
+function renderRecipeDetail(){
+  const r = recipes.find(x => x.id === viewRecipeId);
+  if(!r){ viewRecipeId = null; return ''; }
+  const ev = evalRecipe(r, viewPortions / (r.servings || 2));
+  const names = [...new Set(inventory.map(i => String(i.name).trim()))].sort((a, b) => a.localeCompare(b, 'de'));
+  return recipeDetailHtml({ r, ev, portions: viewPortions, img: getImage(r), aliasFor, inventoryNames: names, cookInfo: cookStats(r.id), steps: recipeSteps(r) });
+}
+
+function beginEdit(id){
+  const r = id ? recipes.find(x => x.id === id) : null;
+  if(id && !r){ editing = null; return; }
+  editing = {
+    isNew: !r,
+    base: r || null,
+    name: r ? r.name : '',
+    category: r ? (r.category || '') : '',
+    servings: r && r.servings ? String(r.servings) : '',
+    zeit: r ? (r.zeit || '') : '',
+    sourceUrl: r ? (r.sourceUrl || '') : '',
+    tags: r ? [...(r.tags || [])] : [],
+    img: r && r.hasImage ? (imageCache.get(r.id) || null) : null,
+    newImage: null,
+    removeImage: false,
+    ingredients: r ? (r.ingredients || []).map(i => ({
+      name: i.name || '', amount: String(i.amount ?? ''), unit: i.unit || '', note: i.note || '', approx: !!i.approx
+    })) : [],
+    steps: r ? recipeSteps(r) : []
+  };
+}
+
+async function saveEdit(){
+  const e = editing;
+  if(!e) return;
+  const name = e.name.trim();
+  if(!name){ statusMsg = 'Bitte einen Namen für das Rezept eintragen.'; render(); return; }
+  // Jede Zutat normalisieren: auch eine in den Namen getippte Menge ("200g Mehl") wird getrennt.
+  const ingredients = e.ingredients.map(i => {
+    const clean = { name: String(i.name || '').trim(), amount: String(i.amount || '').trim(), unit: canonicalUnit(i.unit || '') };
+    const norm = normalizeIngredient(clean);
+    const out = { ...norm };
+    if(i.note && i.note.trim()) out.note = i.note.trim();
+    if(i.approx) out.approx = true;
+    return out;
+  }).filter(i => i.name);
+  const steps = e.steps.map(s => String(s || '').trim()).filter(Boolean);
+  const servingsNum = parseAmount(e.servings);
+  const base = e.base || {};
+  const rec = {
+    ...base,
+    id: base.id || uid(),
+    name,
+    tags: e.tags,
+    ingredients,
+    steps,
+    category: e.category || undefined,
+    servings: servingsNum && servingsNum > 0 ? Math.round(servingsNum) : undefined,
+    zeit: e.zeit.trim() || undefined,
+    sourceUrl: e.sourceUrl.trim() || undefined,
+    source: base.source || 'manuell',
+    status: 'ok',
+    editedAt: new Date().toISOString()
+  };
+  // Waren die Schritte bisher im Notizfeld, würden sie sonst doppelt erscheinen.
+  if(!(base.steps && base.steps.length) && steps.length) rec.notes = '';
+  try{
+    if(e.newImage){
+      await writeKey('img-' + rec.id, { dataUrl: e.newImage });
+      imageCache.set(rec.id, e.newImage);
+      rec.hasImage = true;
+    } else if(e.removeImage && base.hasImage){
+      await writeKey('img-' + rec.id, { dataUrl: '' });
+      imageCache.set(rec.id, '');
+      rec.hasImage = false;
+    }
+  }catch(err){
+    console.error(err);
+    statusMsg = 'Das Bild konnte nicht gespeichert werden. Das Rezept wird ohne neues Bild gesichert.';
+  }
+  recipes = await mutateShared('recipes', recipes, (list) => {
+    const i = list.findIndex(x => x.id === rec.id);
+    if(i >= 0) list[i] = rec; else list.push(rec);
+    return list;
+  });
+  editing = null;
+  statusMsg = '„' + name + '" gespeichert.';
+  location.replace('#/rezept/' + encodeURIComponent(rec.id));
+}
+
+// Wann und wie oft ein Rezept gekocht wurde (aus meta.cookLog).
+function cookStats(id){
+  const log = (meta && Array.isArray(meta.cookLog)) ? meta.cookLog.filter(e => e.id === id) : [];
+  if(!log.length) return null;
+  const last = new Date(log[0].at).toLocaleDateString('de-DE', { day: 'numeric', month: 'short' });
+  return { last, count: log.length };
+}
+
+function undoStripHtml(){
+  const u = meta && meta.undo;
+  if(!u || !u.at || !Array.isArray(u.items)) return '';
+  if(Date.now() - new Date(u.at).getTime() > 30 * 60 * 1000) return '';
+  return `<div class="undo-strip"><span>„${escapeHtml(u.name)}" abgebucht (${u.items.length} Artikel)</span>
+    <button class="btn small" data-action="undo-cook">Rückgängig</button></div>`;
+}
+
+function sheetRows(){
+  const r = recipes.find(x => x.id === cookSheet.recipeId);
+  if(!r) return null;
+  return { r, rows: planDeduction(r, inventory, matchCtx(), cookSheet.portions / (r.servings || 2)) };
+}
+
+function renderCookSheet(){
+  const data = sheetRows();
+  if(!data){ cookSheet = null; return ''; }
+  const names = [...new Set(inventory.map(i => String(i.name).trim()))].sort((a, b) => a.localeCompare(b, 'de'));
+  return cookSheetHtml({
+    r: data.r, portions: cookSheet.portions, rows: data.rows, aliasFor, inventoryNames: names,
+    on: (row) => cookSheet.on[row.idx] ?? defaultOn(row)
+  });
+}
+
+// Bucht die angehakten Zutaten ab: eine Transaktion auf dem aktuellen Vorrat, mit Rückgängig-Möglichkeit.
+async function confirmCook(){
+  const data = sheetRows();
+  if(!data) return;
+  const { r, rows } = data;
+  const portions = cookSheet.portions;
+  const picks = rows
+    .filter(row => row.kind === 'deduct' && (cookSheet.on[row.idx] ?? defaultOn(row)))
+    .flatMap(row => row.picks);
+  let undo = [];
+  if(picks.length){
+    inventory = await mutateShared('inventory', inventory, (inv) => {
+      const res = applyDeduction(inv, picks);
+      undo = res.undo;
+      return res.inventory;
+    });
+  }
+  const at = new Date().toISOString();
+  meta = await mutateShared('meta', meta, (m) => {
+    m = m || {};
+    m.cookLog = [{ id: r.id, name: r.name, at, portions }, ...(m.cookLog || [])].slice(0, 200);
+    if(undo.length) m.undo = { at, name: r.name, items: undo };
+    else delete m.undo;
+    return m;
+  });
+  cookSheet = null;
+  statusMsg = undo.length ? '' : '„' + r.name + '" als gekocht gemerkt.';
+  activeTab = 'vorrat';
+  goReplace('#');
+}
+
+async function undoCook(){
+  const u = meta && meta.undo;
+  if(!u) return;
+  inventory = await mutateShared('inventory', inventory, (inv) => revertDeduction(inv, u.items));
+  meta = await mutateShared('meta', meta, (m) => {
+    m = m || {};
+    delete m.undo;
+    if(Array.isArray(m.cookLog) && m.cookLog[0] && m.cookLog[0].at === u.at) m.cookLog = m.cookLog.slice(1);
+    return m;
+  });
+  statusMsg = 'Abbuchung rückgängig gemacht.';
+  render();
+}
+
+function renderEditor(){
+  return editorHtml(editing, recipeCategories());
+}
+
+function renderSettings(){
+  const staples = (meta && Array.isArray(meta.staples)) ? meta.staples : DEFAULT_STAPLES;
+  const cats = recipeCategories();
+  const aliases = (meta && meta.aliases) || {};
+  const aliasNames = (meta && meta.aliasNames) || {};
+  const aliasRows = Object.keys(aliases).map(k => `
+    <li><span class="shop-name">${escapeHtml(aliasNames[k] || k)} → ${escapeHtml(aliases[k])}</span>
+      <span class="item-actions"><button data-action="del-alias" data-key="${escapeHtml(k)}" title="Zuordnung entfernen">×</button></span></li>`).join('');
+  const kb = Math.round(new Blob([JSON.stringify(recipes)]).size / 1024);
+  const full = kb >= 700;
+  return `
+    <div class="settings">
+      <div class="detail-bar">
+        <button class="btn small secondary" data-action="go-back">← Zurück</button>
+      </div>
+      <h1 class="detail-title">Einstellungen</h1>
+      <div class="card">
+        <h2>Grundvorrat</h2>
+        <div class="status-line">Immer vorhanden, werden bei Rezepten nie als „fehlt" gezählt und nie abgebucht (kommagetrennt).</div>
+        <div class="add-row">
+          <input type="text" id="staples-input" value="${escapeHtml(staples.join(', '))}">
+          <button class="btn small" data-action="save-staples">Speichern</button>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Rezept-Kategorien</h2>
+        <div class="status-line">Für den Filter in der Rezeptliste. Bestehende Rezepte behalten ihre Kategorie.</div>
+        <div>${cats.map(c => `<span class="tag-chip selected">${escapeHtml(c)} <span data-action="del-recipe-category" data-cat="${escapeHtml(c)}" title="Entfernen">×</span></span>`).join('')}</div>
+        <div class="add-row">
+          <input type="text" id="new-category-input" placeholder="Neue Kategorie, z. B. Frühstück">
+          <button class="btn small" data-action="add-recipe-category">Hinzufügen</button>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Gelernte Zuordnungen</h2>
+        <div class="status-line">Hast du bei einer fehlenden Zutat „Hab ich anders" gewählt, steht es hier.</div>
+        ${aliasRows ? `<ul class="shopping-list">${aliasRows}</ul>` : '<div class="empty-note">Noch keine Zuordnungen.</div>'}
+      </div>
+      <div class="card">
+        <h2>Instagram-Rezepte importieren</h2>
+        <div class="status-line">Datei aus der Instagram-Sync einspielen. Schon vorhandene Rezepte – auch von Hand geänderte – bleiben unverändert, es kommt nur Neues dazu.</div>
+        <div class="recipe-controls"><button class="btn small" data-action="ig-import">Datei auswählen</button></div>
+        <input type="file" id="ig-file" accept="application/json,.json" style="display:none;">
+        <div class="status-line" id="ig-status">${escapeHtml(igStatus)}</div>
+        ${igUndoBoxHtml()}
+      </div>
+      <div class="card">
+        <h2>Daten</h2>
+        <div class="status-line">Rezepte belegen ${kb} KB von rund 1000 KB in der Datenbank${full ? ' – bald voll, bitte melden.' : '. Titelbilder liegen getrennt und zählen nicht mit; sie sind nicht in der Sicherung enthalten.'}</div>
+        <div class="recipe-controls">
+          <button class="btn small secondary" data-action="export-json">Daten sichern (Export)</button>
+          <button class="btn small secondary" data-action="import-json">Sicherung einspielen (Import)</button>
+          ${firebaseConfigured() ? '<button class="btn small secondary" data-action="change-household">Haushalts-Code ändern</button>' : ''}
+        </div>
+        <input type="file" id="import-file" accept="application/json,.json" style="display:none;">
+        <div class="footer-note-dark">Alle Daten liegen ${storeMode()==='firebase' ? 'sicher in eurer gemeinsamen Cloud-Datenbank' : 'derzeit nur lokal auf diesem Gerät'}. App-Updates verändern gespeicherte Daten nie.</div>
+      </div>
+    </div>`;
 }
 
 // ---------- Rendering ----------
@@ -548,18 +606,36 @@ function scheduleRender(){
 }
 
 function render(){
+  renderInner();
+  loadVisibleImages();
+}
+
+function renderInner(){
   pendingRender = false;
+  evalCache.clear();
   const app = document.getElementById('app');
   if(firebaseConfigured() && !householdCode){ app.innerHTML = renderHouseholdScreen(); return; }
   if(!ready){ app.innerHTML = '<div class="loading">Vorratsregal wird geladen ...</div>'; return; }
+  if(cookSheet){
+    const sheet = renderCookSheet();
+    if(sheet){ app.innerHTML = sheet; return; }
+  }
+  if(editing){ app.innerHTML = renderEditor(); return; }
   if(cookingRecipeId){
     const cook = renderCookMode();
     if(cook){ app.innerHTML = cook; return; }
   }
+  if(viewRecipeId){
+    const detail = renderRecipeDetail();
+    if(detail){ app.innerHTML = detail; return; }
+  }
+  if(settingsOpen){ app.innerHTML = renderSettings(); return; }
   const openCount = openShoppingCount();
   const modeNote = storeMode() === 'firebase'
     ? 'Gemeinsame Liste – Änderungen erscheinen sofort auf allen Geräten.'
     : 'Lokaler Modus: Daten nur auf diesem Gerät (Firebase noch nicht eingerichtet).';
+  const panels = { vorrat: renderVorrat, rezepte: renderRezepte, wochenplan: renderWochenplan, einkauf: renderEinkauf };
+  const tab = (key, label, extra = '') => `<button data-action="switch-tab" data-tab="${key}" class="${activeTab===key?'active':''}">${label}${extra}</button>`;
   app.innerHTML = `
     <div class="app-header">
       <div>
@@ -568,20 +644,18 @@ function render(){
       </div>
       <div class="sync-row">
         <span class="sync-time"><span class="sync-dot ${online ? '' : 'offline'}"></span>${online ? 'Stand: ' + fmtTime(lastSync) : 'Offline – Änderungen werden nachgereicht'}</span>
+        <button class="icon-btn" data-action="open-settings" aria-label="Einstellungen" title="Einstellungen">⚙</button>
       </div>
     </div>
+    ${undoStripHtml()}
     <div class="status-banner">${statusMsg ? escapeHtml(statusMsg) : ''}</div>
-    <nav class="tabs">
-      <button data-action="switch-tab" data-tab="vorrat" class="${activeTab==='vorrat'?'active':''}">Vorrat</button>
-      <button data-action="switch-tab" data-tab="rezepte" class="${activeTab==='rezepte'?'active':''}">Rezepte</button>
-      <button data-action="switch-tab" data-tab="wochenplan" class="${activeTab==='wochenplan'?'active':''}">Wochenplan</button>
-      <button data-action="switch-tab" data-tab="einkauf" class="${activeTab==='einkauf'?'active':''}">Einkauf${openCount ? '<span class="tab-count">'+openCount+'</span>' : ''}</button>
+    <div class="panel active">${(panels[activeTab] || renderVorrat)()}</div>
+    <nav class="tabs bottom">
+      ${tab('vorrat', 'Vorrat')}
+      ${tab('rezepte', 'Rezepte')}
+      ${tab('wochenplan', 'Plan')}
+      ${tab('einkauf', 'Einkauf', openCount ? '<span class="tab-count">'+openCount+'</span>' : '')}
     </nav>
-    <div class="panel ${activeTab==='vorrat'?'active':''}">${renderVorrat()}</div>
-    <div class="panel ${activeTab==='rezepte'?'active':''}">${renderRezepte()}</div>
-    <div class="panel ${activeTab==='wochenplan'?'active':''}">${renderWochenplan()}</div>
-    <div class="panel ${activeTab==='einkauf'?'active':''}">${renderEinkauf()}</div>
-    ${renderFooterTools()}
   `;
 }
 
@@ -602,15 +676,24 @@ function renderHouseholdScreen(){
   `;
 }
 
+// Kleiner Zusatz unter dem Artikelnamen: Inhalt je Packung bzw. Hinweis, dass er fehlt.
+function packInfoHtml(i){
+  if(!isItemUnit(i.unit)) return '';
+  if(parseAmount(i.packSize)){
+    return `<span class="item-sub">je ${escapeHtml(formatQuantity(i.packSize, i.packUnit || 'g'))}</span>`;
+  }
+  return '<span class="item-sub warn">Inhalt je Packung eintragen (✎)</span>';
+}
+
 // Eine Vorratszeile: normal (großer Stepper + Bearbeiten) oder als Bearbeiten-Formular.
 function renderItemRow(i){
   if(i.id === editingItemId) return renderItemEdit(i);
   return `
     <div class="item-row" data-item-id="${i.id}">
-      <span class="item-name">${escapeHtml(i.name)}</span>
+      <span class="item-name">${escapeHtml(i.name)}${packInfoHtml(i)}</span>
       <span class="item-stepper">
         <button class="step-btn" data-action="dec-item" aria-label="Menge verringern">−</button>
-        <span class="item-qty">${escapeHtml(String(i.amount))}${i.unit ? ' '+escapeHtml(i.unit) : ''}</span>
+        <span class="item-qty">${escapeHtml(formatQuantity(i.amount, i.unit))}</span>
         <button class="step-btn" data-action="inc-item" aria-label="Menge erhöhen">+</button>
       </span>
       <button class="edit-btn" data-action="edit-item" aria-label="Artikel bearbeiten" title="Bearbeiten: Ort, Kategorie, löschen">✎</button>
@@ -628,7 +711,14 @@ function renderItemEdit(i){
         <input type="text" class="edit-name" value="${escapeHtml(i.name)}" placeholder="Artikel">
         <div class="edit-line">
           <input type="number" class="qty-input edit-amount" value="${escapeHtml(String(i.amount))}" min="0" step="any" placeholder="Menge">
-          <input type="text" class="unit-input edit-unit" value="${escapeHtml(i.unit||'')}" placeholder="Einheit">
+          <select class="unit-select edit-unit" data-action="edit-unit-change">${unitSelectOptions(i.unit)}</select>
+        </div>
+        <div class="edit-line edit-pack" ${isItemUnit(i.unit) ? '' : 'hidden'}>
+          <span class="pack-label">1 ${escapeHtml(canonicalUnit(i.unit) || 'Packung')} enthält</span>
+          <input type="number" class="qty-input edit-pack-size" value="${escapeHtml(String(i.packSize || ''))}" min="0" step="any" placeholder="z. B. 500">
+          <select class="unit-select edit-pack-unit">
+            ${['g', 'ml', 'stk'].map(u => `<option value="${u}" ${(i.packUnit || 'g')===u?'selected':''}>${u}</option>`).join('')}
+          </select>
         </div>
         <div class="edit-line">
           <label class="edit-field"><span>Lagerort</span><select class="edit-loc">${locOpts}</select></label>
@@ -698,7 +788,7 @@ function renderLocBlocks(){
         <div class="add-row">
           <input type="text" placeholder="Artikel" class="new-item-name" data-loc="${loc}">
           <input type="number" placeholder="Menge" class="qty-input new-item-qty" data-loc="${loc}" value="1" min="0">
-          <input type="text" placeholder="Einheit" class="unit-input new-item-unit" data-loc="${loc}">
+          <select class="unit-select new-item-unit" data-loc="${loc}">${unitSelectOptions('')}</select>
           <select class="new-item-cat" data-loc="${loc}">
             ${CATEGORIES.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('')}
           </select>
@@ -823,39 +913,64 @@ function renderPhotoBox(){
   `;
 }
 
+function filteredRecipes(){
+  const q = recipeSearch.trim().toLowerCase();
+  let list = recipes.filter(r => !r.hidden);
+  if(q) list = list.filter(r => (r.name + ' ' + (r.ingredients || []).map(i => i.name).join(' ')).toLowerCase().includes(q));
+  if(recipeCatFilter !== 'alle' && recipeCatFilter !== 'kochbar') list = list.filter(r => r.category === recipeCatFilter);
+  if(recipeFilterTags.length) list = list.filter(r => recipeFilterTags.every(t => (r.tags || []).includes(t)));
+  let rows = list.map(r => ({ r, ev: evalRecipe(r) }));
+  if(recipeCatFilter === 'kochbar') rows = rows.filter(x => x.ev.ok && x.ev.total > 0);
+  // Vollständige Rezepte nach Verfügbarkeit zuerst, Rezepte ohne Zutatenliste ans Ende.
+  const lacking = x => x.ev.total === 0 ? 1e6 : x.ev.missing.length + x.ev.short.length;
+  rows.sort((a, b) => lacking(a) - lacking(b) || a.r.name.localeCompare(b.r.name, 'de'));
+  return rows;
+}
+
+function renderRecipeGrid(){
+  const all = filteredRecipes();
+  if(!all.length) return '<div class="empty-note">Keine Rezepte für diese Auswahl.</div>';
+  const shown = all.slice(0, recipeShown);
+  const more = all.length > shown.length
+    ? `<div class="more-row"><button class="btn small secondary" data-action="recipes-more">Mehr anzeigen (${all.length - shown.length})</button></div>`
+    : '';
+  return `<div class="rgrid">${shown.map(x => recipeCardHtml(x.r, x.ev, getImage(x.r))).join('')}</div>${more}`;
+}
+
+function recipeCountText(){
+  const n = filteredRecipes().length;
+  return n + (n === 1 ? ' Rezept' : ' Rezepte') + ' – sortiert danach, wofür am meisten schon da ist.';
+}
+
+// Aktualisiert nur Liste und Zähler, damit das Suchfeld beim Tippen den Fokus behält.
+function refreshRecipeList(){
+  const grid = document.getElementById('recipe-grid');
+  if(grid){ grid.innerHTML = renderRecipeGrid(); loadVisibleImages(); }
+  const info = document.getElementById('recipe-count');
+  if(info) info.textContent = recipeCountText();
+}
+
 function renderRezepte(){
-  const chips = TAGS.map(t => `
+  const chip = (key, label) => `<span class="tag-chip ${recipeCatFilter === key ? 'selected' : ''}" data-action="set-cat-filter" data-cat="${escapeHtml(key)}">${escapeHtml(label)}</span>`;
+  const tagChips = TAGS.map(t => `
     <span class="tag-chip ${recipeFilterTags.includes(t)?'selected':''}" data-action="toggle-filter-tag" data-tag="${t}">${t}</span>
   `).join('');
-
-  let list = recipes;
-  if(recipeFilterTags.length){
-    list = list.filter(r => recipeFilterTags.every(t => r.tags.includes(t)));
-  }
-  list = [...list].sort((a,b) => missingIngredients(a).length - missingIngredients(b).length);
-
-  const cards = list.length ? list.map(r => renderRecipeCard(r)).join('') : '<div class="empty-note">Keine Rezepte für diese Auswahl.</div>';
-
+  const aiOpen = aiDetailsOpen || aiPasteOpen || aiSuggestions || aiError;
   return `
     <div class="card">
-      <h2>Rezeptideen</h2>
-      <div>${chips}</div>
-      <div class="status-line">Sortiert danach, wofür am meisten schon da ist.</div>
-      ${cards}
-    </div>
-    <div class="card">
-      <h3>KI-Vorschläge über die Claude-App</h3>
-      ${renderAiBox()}
-    </div>
-    <div class="card">
-      <h3>Neues Rezept anlegen</h3>
-      <div class="paste-box">
-        <div class="paste-hint">Eine Zutat pro Zeile – die Menge darf vorne oder hinten stehen (z. B. „200 g Linsen", „Linsen 200 g" oder einfach „Zwiebel"). Den Gerichtsnamen oben eintragen; ist das Feld leer, wird die erste Zeile als Name genommen. Danach unten Tags wählen und speichern.</div>
-        <textarea id="paste-area" rows="4" placeholder="Linsensuppe&#10;200 g rote Linsen&#10;2 Karotten&#10;1 Zwiebel"></textarea>
-        <div style="margin-top:8px;"><button class="btn small secondary" data-action="parse-paste">In Formular übernehmen</button></div>
+      <div class="head-row"><h2>Rezepte</h2><button class="btn small" data-action="new-recipe">+ Neu</button></div>
+      <div class="search-row">
+        <input type="search" id="recipe-search" placeholder="🔍 Rezept oder Zutat suchen" value="${escapeHtml(recipeSearch)}" autocomplete="off">
       </div>
-      ${renderNewRecipeForm()}
+      <div class="chip-row">${chip('alle', 'Alle')}${chip('kochbar', 'Kochbar jetzt')}${recipeCategories().map(c => chip(c, c)).join('')}</div>
+      <details class="more-filters" ${recipeFilterTags.length ? 'open' : ''}><summary>Weitere Filter</summary><div>${tagChips}</div></details>
+      <div class="status-line" id="recipe-count">${escapeHtml(recipeCountText())}</div>
+      <div id="recipe-grid">${renderRecipeGrid()}</div>
     </div>
+    <details class="card ai-details" ${aiOpen ? 'open' : ''}>
+      <summary>KI-Vorschläge über die Claude-App</summary>
+      ${renderAiBox()}
+    </details>
   `;
 }
 
@@ -918,60 +1033,6 @@ function renderAiBox(){
   `;
 }
 
-function renderRecipeCard(r){
-  const badge = availabilityBadge(r);
-  const missing = missingIngredients(r).map(i=>i.name);
-  const ingItems = r.ingredients.map(i => {
-    const miss = missing.includes(i.name);
-    return `<li class="${miss?'miss':'have'}">${escapeHtml(i.name)}${i.amount?` (${escapeHtml(String(i.amount))}${i.unit?' '+escapeHtml(i.unit):''})`:''}</li>`;
-  }).join('');
-  const tagsHtml = r.tags.map(t => `<span class="recipe-tag">${escapeHtml(t)}</span>`).join('');
-  const effort = r.aufwand ? `<span class="effort-badge">${r.aufwand==='aufwändig'?'aufwändig':'schnell'}${r.zeit?' · '+escapeHtml(r.zeit):''}</span>` : '';
-
-  return `
-    <div class="recipe-card" data-recipe-id="${r.id}">
-      <div class="recipe-top">
-        <p class="recipe-title">${escapeHtml(r.name)}${effort}</p>
-        <span class="avail-badge ${badge.cls}">${badge.text}</span>
-      </div>
-      <div class="recipe-tags">${tagsHtml}</div>
-      <ul class="ing-list">${ingItems}</ul>
-      ${r.notes ? `<div class="recipe-notes">${escapeHtml(r.notes)}</div>` : ''}
-      <div class="recipe-controls">
-        <button class="btn small" data-action="cook-recipe" data-id="${r.id}">👨‍🍳 Kochen</button>
-        <button class="btn small secondary" data-action="plan-recipe" data-id="${r.id}">Für Wochenplan vormerken</button>
-        <button class="btn small secondary" data-action="del-recipe" data-id="${r.id}">Löschen</button>
-      </div>
-    </div>
-  `;
-}
-
-function renderNewRecipeForm(){
-  const chips = TAGS.map(t => `
-    <span class="tag-chip ${draftTags.includes(t) ? 'selected':''}" data-action="toggle-draft-tag" data-tag="${t}">${t}</span>
-  `).join('');
-
-  const ingRows = draftIngredients.map((ing, idx) => `
-    <div class="ing-form-row">
-      <input type="text" value="${escapeHtml(ing.name)}" placeholder="Zutat" data-action="draft-ing-name" data-idx="${idx}">
-      <input type="text" class="qty-input" value="${escapeHtml(ing.amount||'')}" placeholder="Menge" data-action="draft-ing-amount" data-idx="${idx}">
-      <input type="text" class="unit-input" value="${escapeHtml(ing.unit||'')}" placeholder="Einheit" data-action="draft-ing-unit" data-idx="${idx}">
-      <button class="btn small secondary" data-action="remove-draft-ing" data-idx="${idx}">×</button>
-    </div>
-  `).join('');
-
-  return `
-    <div class="new-recipe-form">
-      <input type="text" id="new-recipe-name" placeholder="Name des Gerichts" value="${escapeHtml(draftName)}">
-      <div>${chips}</div>
-      <div id="draft-ing-rows">${ingRows}</div>
-      <div><button class="btn small secondary" data-action="add-draft-ing">+ Zutat</button></div>
-      <textarea id="new-recipe-notes" placeholder="Zubereitung – ein Schritt pro Zeile (erscheint so im Kochmodus)" rows="3">${escapeHtml(draftNotes)}</textarea>
-      <div><button class="btn" data-action="save-recipe">Rezept speichern</button></div>
-    </div>
-  `;
-}
-
 function renderWochenplan(){
   const days = DAYS.map(day => {
     const recipeId = weekplan[day];
@@ -979,9 +1040,10 @@ function renderWochenplan(){
     const options = recipes.map(r => `<option value="${r.id}" ${r.id===recipeId?'selected':''}>${escapeHtml(r.name)}</option>`).join('');
     let inner = '';
     if(recipe){
-      const missing = missingIngredients(recipe);
-      inner = missing.length
-        ? `<div class="status-line" style="margin-top:6px;">Fehlt noch: ${missing.map(i=>escapeHtml(i.name)).join(', ')}</div>`
+      const ev = evalRecipe(recipe);
+      const lacking = [...ev.missing.map(row => row.ing.name), ...ev.short.map(row => row.ing.name + ' (knapp)')];
+      inner = lacking.length
+        ? `<div class="status-line" style="margin-top:6px;">Fehlt noch: ${lacking.map(n => escapeHtml(n)).join(', ')}</div>`
         : `<div class="status-line" style="margin-top:6px; color:#5B7A52;">Alles vorrätig</div>`;
     }
     return `
@@ -998,13 +1060,13 @@ function renderWochenplan(){
     `;
   }).join('');
 
-  const missingNames = plannedMissingNames();
-  const alreadyListed = new Set(shopping.map(s => s.name.trim().toLowerCase()));
-  const newNames = missingNames.filter(n => !alreadyListed.has(n.trim().toLowerCase()));
-  const missingHtml = missingNames.length
-    ? `<ul class="shopping-list">${missingNames.map(n=>`<li><span class="shop-name">${escapeHtml(n)}</span>${alreadyListed.has(n.trim().toLowerCase())?'<span class="shop-src">schon auf der Liste</span>':''}</li>`).join('')}</ul>
+  const needs = plannedNeeds();
+  const listedKeys = new Set(shopping.filter(s => !s.checked).map(s => normKey(s.name)));
+  const newNeeds = needs.filter(n => !listedKeys.has(normKey(n.name)));
+  const missingHtml = needs.length
+    ? `<ul class="shopping-list">${needs.map(n=>`<li><span class="shop-name">${escapeHtml(n.name)}${n.amount ? ' – ' + escapeHtml(formatQuantity(n.amount, n.unit)) : ''}</span>${listedKeys.has(normKey(n.name))?'<span class="shop-src">schon auf der Liste</span>':''}</li>`).join('')}</ul>
        <div class="recipe-controls" style="margin-top:10px;">
-         <button class="btn small" data-action="missing-to-shopping" ${newNames.length===0?'disabled':''}>${newNames.length ? newNames.length + ' fehlende Zutaten auf die Einkaufsliste' : 'Alles schon auf der Einkaufsliste'}</button>
+         <button class="btn small" data-action="missing-to-shopping" ${newNeeds.length===0?'disabled':''}>${newNeeds.length ? newNeeds.length + ' fehlende Zutaten auf die Einkaufsliste' : 'Alles schon auf der Einkaufsliste'}</button>
        </div>`
     : '<div class="empty-note">Für die geplanten Gerichte ist alles da, oder es ist noch nichts geplant.</div>';
 
@@ -1023,14 +1085,10 @@ function renderWochenplan(){
   `;
 }
 
-function plannedMissingNames(){
-  const plannedRecipes = Object.values(weekplan).map(id => recipes.find(r=>r.id===id)).filter(Boolean);
-  const missingMap = {};
-  plannedRecipes.forEach(r => missingIngredients(r).forEach(ing => {
-    const key = ing.name.trim().toLowerCase();
-    if(!missingMap[key]) missingMap[key] = ing.name;
-  }));
-  return Object.values(missingMap);
+// Fehlende und knappe Zutaten aller geplanten Gerichte, gleiche Zutaten zusammengefasst.
+function plannedNeeds(){
+  const planned = Object.values(weekplan).map(id => recipes.find(r => r.id === id)).filter(Boolean);
+  return mergeNeeds(planned.flatMap(r => needsOfEvaluation(evalRecipe(r), 1)));
 }
 
 function renderEinkauf(){
@@ -1039,8 +1097,8 @@ function renderEinkauf(){
   const row = (s) => `
     <li class="${s.checked?'checked':''}">
       <input type="checkbox" data-action="toggle-shop" data-id="${s.id}" ${s.checked?'checked':''}>
-      <span class="shop-name">${escapeHtml(s.name)}${s.amount ? ' – ' + escapeHtml(String(s.amount)) + (s.unit ? ' ' + escapeHtml(s.unit) : '') : ''}</span>
-      ${s.source === 'plan' ? '<span class="shop-src">Wochenplan</span>' : ''}
+      <span class="shop-name">${escapeHtml(s.name)}${s.amount ? ' – ' + escapeHtml(formatQuantity(s.amount, s.unit)) : ''}</span>
+      ${s.source === 'plan' ? '<span class="shop-src">Wochenplan</span>' : s.source === 'rezept' ? '<span class="shop-src">Rezept</span>' : ''}
       <span class="item-actions"><button data-action="del-shop" data-id="${s.id}" title="entfernen">×</button></span>
     </li>
   `;
@@ -1068,18 +1126,6 @@ function renderEinkauf(){
   `;
 }
 
-function renderFooterTools(){
-  return `
-    <div class="footer-tools">
-      <button class="btn small secondary" data-action="export-json">Daten sichern (Export)</button>
-      <button class="btn small secondary" data-action="import-json">Sicherung einspielen (Import)</button>
-      ${firebaseConfigured() ? '<button class="btn small secondary" data-action="change-household">Haushalts-Code ändern</button>' : ''}
-      <input type="file" id="import-file" accept="application/json,.json" style="display:none;">
-      <span class="footer-note">Alle Daten liegen ${storeMode()==='firebase' ? 'sicher in eurer gemeinsamen Cloud-Datenbank' : 'derzeit nur lokal auf diesem Gerät'}. App-Updates verändern gespeicherte Vorräte nie.</span>
-    </div>
-  `;
-}
-
 // ---------- Aktionen ----------
 
 async function addItem(loc){
@@ -1089,7 +1135,7 @@ async function addItem(loc){
   const catInput = document.querySelector(`.new-item-cat[data-loc="${loc}"]`);
   const name = nameInput.value.trim();
   if(!name) return;
-  const newItem = { id: uid(), name, amount: qtyInput.value || '1', unit: unitInput.value.trim(), location: loc, category: catInput.value };
+  const newItem = withPackSize({ id: uid(), name, amount: qtyInput.value || '1', unit: canonicalUnit(unitInput.value), location: loc, category: catInput.value });
   inventory = await mutateShared('inventory', inventory, (inv) => { inv.push(newItem); return inv; });
   render();
 }
@@ -1100,8 +1146,8 @@ async function bulkAdd(){
   const cat = document.getElementById('bulk-add-cat').value;
   const lines = (ta ? ta.value : bulkDraft).split('\n').map(l=>l.trim()).filter(Boolean);
   if(!lines.length) return;
-  const newItems = lines.map(parseIngredientLine).filter(Boolean).map(p => ({
-    id: uid(), name: p.name, amount: p.amount || '1', unit: p.unit || '', location: loc, category: cat
+  const newItems = lines.map(parseIngredientLine).filter(Boolean).map(p => withPackSize({
+    id: uid(), name: p.name, amount: p.amount || '1', unit: canonicalUnit(p.unit), location: loc, category: cat
   }));
   inventory = await mutateShared('inventory', inventory, (inv) => { newItems.forEach(it => inv.push(it)); return inv; });
   bulkDraft = '';
@@ -1114,10 +1160,12 @@ async function changeItem(id, action){
     const item = inv.find(i => i.id === id);
     if(!item) return inv;
     if(action === 'del-item') return inv.filter(i => i.id !== id);
-    let n = parseFloat(String(item.amount).replace(',','.')) || 0;
-    n += action === 'inc-item' ? 1 : -1;
-    if(n <= 0) return inv.filter(i => i.id !== id);
-    item.amount = n;
+    // Schrittweite richtet sich nach der Einheit (g/ml ±50, kg/l ±0,5, Stück/Packung ±1).
+    let n = parseAmount(item.amount) || 0;
+    const step = stepFor(item.unit);
+    n += action === 'inc-item' ? step : -step;
+    if(n <= 0.0001) return inv.filter(i => i.id !== id);
+    item.amount = Math.round(n * 1000) / 1000;
     return inv;
   });
   render();
@@ -1135,11 +1183,26 @@ async function saveItemEdit(id){
   const unit = row.querySelector('.edit-unit').value.trim();
   const location = row.querySelector('.edit-loc').value;
   const category = row.querySelector('.edit-cat').value;
+  const packSize = isItemUnit(unit) ? parseAmount(row.querySelector('.edit-pack-size').value) : null;
+  const packUnit = row.querySelector('.edit-pack-unit').value;
   inventory = await mutateShared('inventory', inventory, (inv) => {
     const it = inv.find(x => x.id === id);
-    if(it){ it.name = name; it.amount = amount || '1'; it.unit = unit; it.location = location; it.category = category; }
+    if(it){
+      it.name = name; it.amount = amount || '1'; it.unit = unit; it.location = location; it.category = category;
+      if(packSize){ it.packSize = packSize; it.packUnit = packUnit; }
+      else { delete it.packSize; delete it.packUnit; }
+    }
     return inv;
   });
+  // Packungsgröße je Artikelname merken, damit sie beim nächsten Einkauf vorbelegt ist.
+  if(packSize){
+    const key = name.toLowerCase();
+    meta = await mutateShared('meta', meta, (m) => {
+      m = m || {};
+      m.packSizes = { ...(m.packSizes || {}), [key]: { size: packSize, unit: packUnit } };
+      return m;
+    });
+  }
   editingItemId = null;
   statusMsg = 'Artikel aktualisiert.';
   render();
@@ -1152,25 +1215,163 @@ async function deleteItemEdit(id){
   render();
 }
 
-async function saveRecipe(){
-  const nameEl = document.getElementById('new-recipe-name');
-  const name = nameEl.value.trim();
-  if(!name){ nameEl.focus(); return; }
-  // Beim Speichern jede Zutat normalisieren – so wird auch eine manuell ins Namensfeld
-  // getippte Menge ("200g Mehl") noch in Name/Menge/Einheit getrennt.
-  const ingredients = draftIngredients.map(normalizeIngredient).filter(i => i.name.trim());
-  const notes = document.getElementById('new-recipe-notes').value.trim();
-  const newRecipe = { id: uid(), name, tags: [...draftTags], ingredients, notes };
-  recipes = await mutateShared('recipes', recipes, (list) => { list.push(newRecipe); return list; });
-  draftIngredients = []; draftTags = []; draftName = ''; draftNotes = '';
+// Löscht die Rezepte der letzten Import-Charge, außer von Hand bearbeitete. Bilder werden mitgelöscht.
+async function undoInstagramImport(){
+  const batch = nextBatch(meta && meta.igBatches);
+  if(!batch) return;
+  let plan = null;
+  recipes = await mutateShared('recipes', recipes, (list) => {
+    plan = planUndo(batch, list);
+    return applyUndo(list, plan);
+  });
+  if(!plan) return;
+  for(const id of plan.remove){
+    try{ await deleteKey('img-' + id); }catch(e){ console.error(e); }
+    imageCache.delete(id);
+  }
+  if(plan.remove.length){
+    const gone = new Set(plan.remove);
+    weekplan = await mutateShared('weekplan', weekplan, (wp) => {
+      DAYS.forEach(d => { if(gone.has(wp[d])) delete wp[d]; });
+      return wp;
+    });
+  }
+  meta = await mutateShared('meta', meta, (m) => {
+    m = m || {};
+    m.igBatches = markUsed(m.igBatches, batch.id);
+    return m;
+  });
+  igUndoConfirm = false;
+  igStatus = plan.remove.length + ' Rezepte aus dem Import entfernt'
+    + (plan.edited.length ? ', ' + plan.edited.length + ' von dir bearbeitete blieben erhalten' : '') + '.';
   render();
+}
+
+function igUndoBoxHtml(){
+  const batch = nextBatch(meta && meta.igBatches);
+  if(!batch) return '';
+  const plan = planUndo(batch, recipes);
+  const date = new Date(batch.at).toLocaleDateString('de-DE', { day: 'numeric', month: 'long' });
+  const head = `Letzter Import: ${escapeHtml(date)}, ${batch.ids.length} Rezepte.`;
+  if(!igUndoConfirm){
+    return `<div id="ig-undo-box" class="undo-box"><div class="status-line">${head}</div>
+      <button class="btn small secondary" data-action="ig-undo-ask">Letzten Instagram-Import rückgängig machen</button></div>`;
+  }
+  return `<div id="ig-undo-box" class="undo-box"><div class="status-line">${head}</div>
+    <p class="undo-warn"><strong>${plan.remove.length} Rezepte werden gelöscht</strong>, samt Titelbildern.
+    ${plan.edited.length ? `${plan.edited.length} davon hast du bearbeitet, sie bleiben erhalten. ` : ''}
+    ${plan.gone.length ? `${plan.gone.length} gibt es nicht mehr. ` : ''}Das lässt sich nicht zurücknehmen; der Import selbst kann danach erneut eingespielt werden.</p>
+    <div class="recipe-controls">
+      <button class="btn small danger" data-action="ig-undo-do" ${plan.remove.length ? '' : 'disabled'}>Endgültig rückgängig machen</button>
+      <button class="btn small secondary" data-action="ig-undo-cancel">Abbrechen</button>
+    </div></div>`;
+}
+
+function setIgStatus(msg){
+  igStatus = msg;
+  const el = document.getElementById('ig-status');
+  if(el) el.textContent = msg;
+}
+
+// Spielt die Sync-Datei ein: Bilder zuerst (eigene Dokumente), dann alle neuen Rezepte in einer Transaktion.
+async function importInstagram(file){
+  try{
+    setIgStatus('Datei wird gelesen …');
+    const items = parseImportFile(await file.text()).map(r => normalizeIgRecipe(r)).filter(Boolean);
+    const { add, skipped } = pickNew(recipes, items);
+    if(!add.length){ setIgStatus('Nichts Neues: ' + skipped + ' Rezepte waren schon vorhanden.'); return; }
+    const size = new Blob([JSON.stringify([...recipes, ...add.map(a => a.recipe)])]).size;
+    if(size > 900 * 1024){
+      setIgStatus('Abgebrochen: Die Rezepte würden die Datenbank-Grenze (rund 1 MB) überschreiten. Nichts wurde geändert.');
+      return;
+    }
+    let done = 0;
+    for(const it of add){
+      if(!it.recipe.id) it.recipe.id = uid();
+      if(it.imageData){
+        await writeKey('img-' + it.recipe.id, { dataUrl: it.imageData });
+        imageCache.set(it.recipe.id, it.imageData);
+      }
+      done++;
+      setIgStatus('Bilder gespeichert: ' + done + ' von ' + add.length + ' …');
+    }
+    let added = [];
+    recipes = await mutateShared('recipes', recipes, (list) => {
+      added = pickNew(list, add).add.map(it => it.recipe);
+      added.forEach(r => list.push(r));
+      return list;
+    });
+    if(added.length){
+      const batch = makeBatch(added);
+      meta = await mutateShared('meta', meta, (m) => {
+        m = m || {};
+        m.igBatches = [batch, ...(m.igBatches || [])].slice(0, 5);
+        return m;
+      });
+    }
+    setIgStatus(added.length + ' neue Rezepte importiert, ' + skipped + ' waren schon vorhanden.');
+    if(settingsOpen) render();
+  }catch(e){
+    console.error(e);
+    setIgStatus('Import fehlgeschlagen: ' + e.message);
+  }
+}
+
+function catsOf(m){
+  return m && Array.isArray(m.recipeCategories) && m.recipeCategories.length ? m.recipeCategories : ['süß', 'deftig'];
+}
+
+async function addRecipeCategory(name){
+  meta = await mutateShared('meta', meta, (m) => {
+    m = m || {};
+    const cur = catsOf(m);
+    if(!cur.includes(name)) m.recipeCategories = [...cur, name];
+    return m;
+  });
+}
+
+// "Hab ich unter anderem Namen": verknüpft die Rezeptzutat dauerhaft mit einem Vorratsartikel.
+async function saveAlias(idx, target){
+  const r = recipes.find(x => x.id === viewRecipeId);
+  const ing = r && r.ingredients[idx];
+  if(!ing) return;
+  const key = normKey(ing.name);
+  meta = await mutateShared('meta', meta, (m) => {
+    m = m || {};
+    m.aliases = { ...(m.aliases || {}), [key]: target };
+    m.aliasNames = { ...(m.aliasNames || {}), [key]: ing.name };
+    return m;
+  });
+  aliasFor = null;
+  statusMsg = '„' + ing.name + '" ist jetzt mit „' + target + '" verknüpft.';
+  render();
+}
+
+// Fehlende und knappe Zutaten eines Rezepts (für die gewählte Portionszahl) auf die Einkaufsliste.
+async function recipeToShopping(id){
+  const r = recipes.find(x => x.id === id);
+  if(!r) return;
+  const factor = viewPortions / (r.servings || 2);
+  const ev = evalRecipe(r, factor);
+  const needs = needsOfEvaluation(ev, factor);
+  let added = 0;
+  shopping = await mutateShared('shopping', shopping, (list) => {
+    needs.forEach(nd => {
+      const listed = list.some(s => !s.checked && normKey(s.name) === normKey(nd.name));
+      if(!listed){ list.push({ id: uid(), name: nd.name, amount: nd.amount, unit: nd.unit, checked: false, source: 'rezept' }); added++; }
+    });
+    return list;
+  });
+  statusMsg = added ? added + ' Zutat' + (added === 1 ? '' : 'en') + ' auf die Einkaufsliste gesetzt.' : 'Alles steht schon auf der Einkaufsliste.';
+  activeTab = 'einkauf';
+  go('');
 }
 
 async function addShoppingItem(){
   const name = document.getElementById('new-shop-name').value.trim();
   if(!name) return;
   const amount = document.getElementById('new-shop-amount').value.trim();
-  const unit = document.getElementById('new-shop-unit').value.trim();
+  const unit = canonicalUnit(document.getElementById('new-shop-unit').value);
   const it = { id: uid(), name, amount, unit, checked: false, source: 'manuell' };
   shopping = await mutateShared('shopping', shopping, (list) => { list.push(it); return list; });
   render();
@@ -1181,13 +1382,18 @@ async function shopToInventory(){
   if(!doneItems.length) return;
   inventory = await mutateShared('inventory', inventory, (inv) => {
     doneItems.forEach(it => {
-      const existing = inv.find(x => x.name.trim().toLowerCase() === it.name.trim().toLowerCase());
-      if(existing){
-        const a = parseFloat(String(existing.amount).replace(',','.')) || 0;
-        const b = parseFloat(String(it.amount).replace(',','.')) || 0;
-        if(a && b){ existing.amount = a + b; }
+      const name = it.name.trim();
+      const amount = it.amount || '1';
+      const unit = canonicalUnit(it.unit);
+      const existing = inv.find(x => x.name.trim().toLowerCase() === name.toLowerCase());
+      // Mengen nur addieren, wenn die Einheiten zusammenpassen (1 l + 500 ml = 1,5 l);
+      // sonst als eigener Artikel anlegen statt zu verfälschen oder zu verschlucken.
+      const sum = existing ? addAmounts(existing.amount, existing.unit, amount, unit) : null;
+      if(sum){
+        existing.amount = sum.amount;
+        existing.unit = sum.unit;
       } else {
-        inv.push({ id: uid(), name: it.name.trim(), amount: it.amount || '1', unit: it.unit || '', location: 'Vorratsschrank', category: 'Sonstiges' });
+        inv.push(withPackSize({ id: uid(), name, amount, unit, location: existing ? existing.location : 'Vorratsschrank', category: existing ? itemCategory(existing) : 'Sonstiges' }));
       }
     });
     return inv;
@@ -1280,7 +1486,7 @@ async function copyToClipboard(text){
 }
 
 async function copyAiPrompt(){
-  const ok = await copyToClipboard(buildAiPrompt());
+  const ok = await copyToClipboard(buildAiPrompt(inventory));
   statusMsg = ok ? 'Prompt kopiert – jetzt in der Claude-App einfügen.' : 'Kopieren nicht möglich – bitte Text manuell markieren.';
   render();
 }
@@ -1353,54 +1559,6 @@ async function sendPhotoToClaude(){
 }
 
 // ---------- Spracheingabe (Web Speech API, komplett im Gerät) ----------
-
-const NUM_WORDS = { 'ein':'1','eine':'1','einen':'1','eins':'1','zwei':'2','drei':'3','vier':'4','fünf':'5','sechs':'6','sieben':'7','acht':'8','neun':'9','zehn':'10','elf':'11','zwölf':'12' };
-const UNIT_WORDS = { 'kilo':'kg','kilos':'kg','kilogramm':'kg','gramm':'g','liter':'l','milliliter':'ml','dose':'Dose','dosen':'Dosen','packung':'Packung','packungen':'Packungen','stück':'Stück','stücke':'Stück','flasche':'Flasche','flaschen':'Flaschen','becher':'Becher','glas':'Glas','gläser':'Gläser','bund':'Bund','tüte':'Tüte','tüten':'Tüten' };
-
-function normalizeSpokenLine(line){
-  const words = line.trim().split(/\s+/).filter(Boolean).map((w, i) => {
-    const lw = w.toLowerCase().replace(/[.,;:!?]+$/,'');
-    if(i === 0 && NUM_WORDS[lw]) return NUM_WORDS[lw];
-    if(UNIT_WORDS[lw]) return UNIT_WORDS[lw];
-    return w;
-  });
-  return words.join(' ').trim();
-}
-
-// Erkennt, ob ein Wort eine Mengenangabe ist (Ziffer oder Zahlwort) – dient als
-// Startsignal für einen neuen Artikel innerhalb eines pausenlosen Satzes.
-function isQuantityToken(t){
-  const lw = t.toLowerCase().replace(/[.,;:!?]+$/,'');
-  return /^\d+([.,]\d+)?$/.test(lw) || Object.prototype.hasOwnProperty.call(NUM_WORDS, lw);
-}
-
-// Trennt eine pausenlose Phrase vor jeder Mengenangabe auf, z. B.
-// „zwei Kilo Kartoffeln drei Dosen Kichererbsen" -> ["zwei Kilo Kartoffeln", "drei Dosen Kichererbsen"].
-function splitBeforeQuantities(phrase){
-  const tokens = phrase.trim().split(/\s+/).filter(Boolean);
-  const lines = [];
-  let cur = [];
-  tokens.forEach((t, i) => {
-    if(i > 0 && cur.length && isQuantityToken(t)){
-      lines.push(cur.join(' '));
-      cur = [t];
-    } else {
-      cur.push(t);
-    }
-  });
-  if(cur.length) lines.push(cur.join(' '));
-  return lines;
-}
-
-// Wandelt den erkannten Sprachtext in einzelne Artikelzeilen um. Getrennt wird an
-// drei Signalen: Sprechpausen (Zeilenumbrüche aus den Erkennungs-Abschnitten),
-// Satzzeichen/Bindewörter und Mengenangaben mitten im Satz.
-function spokenToLines(text){
-  const coarse = text.split(/\s*[\n,;]\s*|\s+und\s+|\s+sowie\s+/i).map(s => s.trim()).filter(Boolean);
-  const out = [];
-  coarse.forEach(part => splitBeforeQuantities(part).forEach(l => { if(l.trim()) out.push(l.trim()); }));
-  return out.map(normalizeSpokenLine).filter(Boolean);
-}
 
 // Ein erkannter Sprech-Abschnitt (eine Äußerung) wird zu einer oder mehreren
 // Artikelzeilen und live ans Erfassungsfeld angehängt.
@@ -1524,28 +1682,32 @@ function bindGlobalEvents(){
         recipeFilterTags = recipeFilterTags.includes(t) ? recipeFilterTags.filter(x=>x!==t) : [...recipeFilterTags, t];
         render(); break;
       }
-      case 'toggle-draft-tag': {
-        const t = el.dataset.tag;
-        draftTags = draftTags.includes(t) ? draftTags.filter(x=>x!==t) : [...draftTags, t];
-        render(); break;
-      }
-      case 'add-draft-ing': draftIngredients.push({name:'',amount:'',unit:''}); render(); break;
-      case 'remove-draft-ing': draftIngredients.splice(parseInt(el.dataset.idx),1); render(); break;
-      case 'parse-paste': {
-        const raw = document.getElementById('paste-area').value;
-        const lines = raw.split('\n').map(l=>l.trim()).filter(Boolean);
-        if(lines.length === 0) break;
-        if(draftName.trim()){
-          // Name steht schon oben -> alle Zeilen als Zutaten behandeln, Name nicht überschreiben.
-          draftIngredients = lines.map(parseIngredientLine).filter(Boolean);
-        } else {
-          // Kein Name gesetzt -> erste Zeile ist der Gerichtsname, Rest sind Zutaten.
-          draftName = lines[0];
-          draftIngredients = lines.slice(1).map(parseIngredientLine).filter(Boolean);
-        }
-        render(); break;
-      }
-      case 'save-recipe': await saveRecipe(); break;
+      case 'set-cat-filter': recipeCatFilter = el.dataset.cat; recipeShown = 24; render(); break;
+      case 'recipes-more': recipeShown += 24; refreshRecipeList(); break;
+      case 'new-recipe': go('#/neu'); break;
+      case 'open-settings': go('#/einstellungen'); break;
+      case 'go-back': goBack(); break;
+      case 'edit-recipe': go('#/rezept/' + encodeURIComponent(el.dataset.id) + '/bearbeiten'); break;
+      case 'cook-recipe': go('#/rezept/' + encodeURIComponent(el.dataset.id) + '/kochen'); break;
+      case 'close-cook': goBack(); break;
+      case 'cook-done-open': go('#/rezept/' + encodeURIComponent(el.dataset.id) + '/gekocht'); break;
+      case 'cook-done': viewPortions = cookPortions; go('#/rezept/' + encodeURIComponent(cookingRecipeId) + '/gekocht'); break;
+      case 'sheet-portions-inc': cookSheet.portions += 1; render(); break;
+      case 'sheet-portions-dec': cookSheet.portions = Math.max(1, cookSheet.portions - 1); render(); break;
+      case 'sheet-confirm': await confirmCook(); break;
+      case 'undo-cook': await undoCook(); break;
+      case 'ig-import': document.getElementById('ig-file').click(); break;
+      case 'ig-undo-ask': igUndoConfirm = true; render(); break;
+      case 'ig-undo-cancel': igUndoConfirm = false; render(); break;
+      case 'ig-undo-do': await undoInstagramImport(); break;
+      case 'edit-img-pick': document.getElementById('edit-img-file').click(); break;
+      case 'edit-img-clear': editing.newImage = null; editing.removeImage = true; render(); break;
+      case 'portions-inc': viewPortions += 1; render(); break;
+      case 'portions-dec': viewPortions = Math.max(1, viewPortions - 1); render(); break;
+      case 'cook-portions-inc': cookPortions += 1; render(); break;
+      case 'cook-portions-dec': cookPortions = Math.max(1, cookPortions - 1); render(); break;
+      case 'alias-open': aliasFor = parseInt(el.dataset.idx); render(); break;
+      case 'recipe-to-shopping': await recipeToShopping(el.dataset.id); break;
       case 'del-recipe': {
         if(!confirm('Dieses Rezept wirklich löschen?')) break;
         const id = el.dataset.id;
@@ -1554,10 +1716,63 @@ function bindGlobalEvents(){
           DAYS.forEach(d => { if(wp[d] === id) delete wp[d]; });
           return wp;
         });
+        go(''); break;
+      }
+      case 'edit-cancel': editing = null; goBack(); break;
+      case 'edit-save': await saveEdit(); break;
+      case 'edit-toggle-tag': {
+        const t = el.dataset.tag;
+        editing.tags = editing.tags.includes(t) ? editing.tags.filter(x => x !== t) : [...editing.tags, t];
         render(); break;
       }
-      case 'cook-recipe': openCookMode(el.dataset.id); break;
-      case 'close-cook': closeCookMode(); break;
+      case 'edit-ing-add': editing.ingredients.push({ name: '', amount: '', unit: '', note: '', approx: false }); render(); break;
+      case 'edit-ing-del': editing.ingredients.splice(parseInt(el.dataset.ing), 1); render(); break;
+      case 'edit-ing-paste': {
+        const ta = document.getElementById('edit-paste');
+        if(!ta) break;
+        ta.value.split('\n').map(l => l.trim()).filter(Boolean).map(parseIngredientLine).filter(Boolean).forEach(p => {
+          editing.ingredients.push({ name: p.name, amount: p.amount || '', unit: canonicalUnit(p.unit || ''), note: '', approx: false });
+        });
+        render(); break;
+      }
+      case 'edit-step-add': editing.steps.push(''); render(); break;
+      case 'edit-step-del': editing.steps.splice(parseInt(el.dataset.step), 1); render(); break;
+      case 'edit-step-up': case 'edit-step-down': {
+        const i = parseInt(el.dataset.step);
+        const j = action === 'edit-step-up' ? i - 1 : i + 1;
+        if(j >= 0 && j < editing.steps.length){
+          [editing.steps[i], editing.steps[j]] = [editing.steps[j], editing.steps[i]];
+          render();
+        }
+        break;
+      }
+      case 'save-staples': {
+        const list = document.getElementById('staples-input').value.split(/[,\n]/).map(s => s.trim()).filter(Boolean);
+        meta = await mutateShared('meta', meta, (m) => { m = m || {}; m.staples = list; return m; });
+        statusMsg = 'Grundvorrat gespeichert.';
+        render(); break;
+      }
+      case 'add-recipe-category': {
+        const name = document.getElementById('new-category-input').value.trim();
+        if(name){ await addRecipeCategory(name); render(); }
+        break;
+      }
+      case 'del-recipe-category': {
+        const c = el.dataset.cat;
+        meta = await mutateShared('meta', meta, (m) => { m = m || {}; m.recipeCategories = catsOf(m).filter(x => x !== c); return m; });
+        render(); break;
+      }
+      case 'del-alias': {
+        const k = el.dataset.key;
+        meta = await mutateShared('meta', meta, (m) => {
+          m = m || {};
+          const a = { ...(m.aliases || {}) }; const n = { ...(m.aliasNames || {}) };
+          delete a[k]; delete n[k];
+          m.aliases = a; m.aliasNames = n;
+          return m;
+        });
+        render(); break;
+      }
       case 'toggle-cook-ing': {
         const idx = parseInt(el.dataset.idx);
         cookChecked.has(idx) ? cookChecked.delete(idx) : cookChecked.add(idx);
@@ -1573,7 +1788,7 @@ function bindGlobalEvents(){
         const freeDay = DAYS.find(d => !weekplan[d]) || DAYS[0];
         weekplan = await mutateShared('weekplan', weekplan, (wp) => { wp[freeDay] = id; return wp; });
         activeTab = 'wochenplan';
-        render(); break;
+        go(''); break;
       }
       case 'clear-weekplan': {
         if(!confirm('Den Wochenplan wirklich leeren? (Rezepte und Vorräte bleiben erhalten)')) break;
@@ -1581,12 +1796,12 @@ function bindGlobalEvents(){
         render(); break;
       }
       case 'missing-to-shopping': {
-        const names = plannedMissingNames();
+        const needs = plannedNeeds();
         shopping = await mutateShared('shopping', shopping, (list) => {
-          const listed = new Set(list.map(s => s.name.trim().toLowerCase()));
-          names.forEach(n => {
-            if(!listed.has(n.trim().toLowerCase())){
-              list.push({ id: uid(), name: n, amount: '', unit: '', checked: false, source: 'plan' });
+          const listed = new Set(list.filter(s => !s.checked).map(s => normKey(s.name)));
+          needs.forEach(n => {
+            if(!listed.has(normKey(n.name))){
+              list.push({ id: uid(), name: n.name, amount: n.amount, unit: n.unit, checked: false, source: 'plan' });
             }
           });
           return list;
@@ -1699,6 +1914,21 @@ function bindGlobalEvents(){
   });
 
   app.addEventListener('change', async (e) => {
+    if(e.target && e.target.id === 'edit-img-file'){
+      const file = e.target.files && e.target.files[0];
+      e.target.value = '';
+      if(file && editing){
+        try{
+          editing.newImage = await resizeToDataUrl(file);
+          editing.removeImage = false;
+        }catch(err){
+          console.error(err);
+          statusMsg = 'Das Bild konnte nicht gelesen werden.';
+        }
+        render();
+      }
+      return;
+    }
     if(e.target && e.target.id === 'photo-file-input'){
       const file = e.target.files && e.target.files[0];
       if(file) handlePhotoSelected(file);
@@ -1707,6 +1937,43 @@ function bindGlobalEvents(){
     }
     const el = e.target.closest('[data-action]');
     if(!el) return;
+    if(el.dataset.action === 'edit-unit-change'){
+      // Packungsgröße-Zeile nur bei Gebinde-Einheiten zeigen und mit dem Vorschlag vorbelegen.
+      const row = el.closest('.item-row');
+      const isItem = isItemUnit(el.value);
+      row.querySelector('.edit-pack').hidden = !isItem;
+      row.querySelector('.pack-label').textContent = '1 ' + (canonicalUnit(el.value) || 'Packung') + ' enthält';
+      const sizeInput = row.querySelector('.edit-pack-size');
+      if(isItem && !sizeInput.value){
+        const h = packHint(row.querySelector('.edit-name').value);
+        if(h){ sizeInput.value = h.size; row.querySelector('.edit-pack-unit').value = h.unit; }
+      }
+      return;
+    }
+    if(el.dataset.action === 'edit-category' && editing){
+      if(el.value === '__new'){
+        const name = (prompt('Name der neuen Kategorie?') || '').trim();
+        if(name){ await addRecipeCategory(name); editing.category = name; }
+        render();
+      } else {
+        editing.category = el.value;
+      }
+      return;
+    }
+    if(el.dataset.action === 'ded-toggle' && cookSheet){
+      cookSheet.on[parseInt(el.dataset.idx)] = el.checked;
+      render();
+      return;
+    }
+    if(el.dataset.action === 'edit-ing-approx' && editing){
+      const ing = editing.ingredients[parseInt(el.dataset.ing)];
+      if(ing) ing.approx = el.checked;
+      return;
+    }
+    if(el.dataset.action === 'alias-pick'){
+      if(el.value) await saveAlias(parseInt(el.dataset.idx), el.value);
+      return;
+    }
     if(el.dataset.action === 'set-day-recipe'){
       const day = el.dataset.day;
       const val = el.value;
@@ -1736,33 +2003,31 @@ function bindGlobalEvents(){
     const el = e.target;
     if(el.id === 'inv-search'){ invSearch = el.value; refreshInvSearchView(); return; }
     if(el.id === 'bulk-add-text') bulkDraft = el.value;
-    if(el.id === 'new-recipe-name') draftName = el.value;
-    if(el.id === 'new-recipe-notes') draftNotes = el.value;
-    const action = el.dataset && el.dataset.action;
-    if(action && action.startsWith('draft-ing-')){
-      const idx = parseInt(el.dataset.idx);
-      const field = action === 'draft-ing-name' ? 'name' : action === 'draft-ing-amount' ? 'amount' : 'unit';
-      if(draftIngredients[idx]) draftIngredients[idx][field] = el.value;
+    if(el.id === 'recipe-search'){ recipeSearch = el.value; recipeShown = 24; refreshRecipeList(); return; }
+    if(editing){
+      // Editor: Eingaben direkt in den Entwurf schreiben, gerendert wird erst bei Knopfdruck.
+      if(el.dataset.f){ editing[el.dataset.f] = el.value; return; }
+      if(el.dataset.ing !== undefined && el.dataset.k){
+        const ing = editing.ingredients[parseInt(el.dataset.ing)];
+        if(ing) ing[el.dataset.k] = el.value;
+        return;
+      }
+      if(el.dataset.step !== undefined){ editing.steps[parseInt(el.dataset.step)] = el.value; return; }
     }
   });
 
-  // Manuell getippte Zutat beim Verlassen des Namensfeldes automatisch in Name/Menge/
-  // Einheit aufteilen (z. B. "200g Mehl"), sofern noch keine Menge gesetzt ist.
-  app.addEventListener('focusout', (e) => {
-    const el = e.target;
-    if(!el || el.dataset.action !== 'draft-ing-name') return;
-    const idx = parseInt(el.dataset.idx);
-    const ing = draftIngredients[idx];
-    if(!ing) return;
-    const before = ing.name + '|' + ing.amount + '|' + ing.unit;
-    const norm = normalizeIngredient(ing);
-    if((norm.name + '|' + norm.amount + '|' + norm.unit) !== before){
-      draftIngredients[idx] = norm;
-      render();
-    }
-  });
+  // Merkt, ob der KI-Bereich auf- oder zugeklappt ist (das Ereignis bubbelt nicht, daher capture).
+  app.addEventListener('toggle', (e) => {
+    if(e.target.classList && e.target.classList.contains('ai-details')) aiDetailsOpen = e.target.open;
+  }, true);
 
   document.addEventListener('change', (e) => {
+    if(e.target && e.target.id === 'ig-file'){
+      const file = e.target.files && e.target.files[0];
+      if(file) importInstagram(file);
+      e.target.value = '';
+      return;
+    }
     if(e.target && e.target.id === 'import-file'){
       const file = e.target.files && e.target.files[0];
       if(file) importJson(file);
@@ -1775,6 +2040,11 @@ function bindGlobalEvents(){
     setTimeout(() => { if(pendingRender && !inputFocused()) render(); }, 150);
   });
 
+  window.addEventListener('hashchange', routeFromHash);
+  // Der Browser gibt die Display-Sperre beim App-Wechsel frei – im Kochmodus neu anfordern.
+  document.addEventListener('visibilitychange', () => {
+    if(document.visibilityState === 'visible' && cookingRecipeId) requestWakeLock();
+  });
   window.addEventListener('online', () => { online = true; scheduleRender(); });
   window.addEventListener('offline', () => { online = false; scheduleRender(); });
 }
@@ -1791,8 +2061,7 @@ async function boot(){
   if(storeMode() === 'lokal' && !ready){
     // Lokaler Modus liefert alle Keys synchron; falls Speicher leer war, sind wir trotzdem startklar.
     ready = true;
-    ensureSeedRecipes();
-    render();
+    routeFromHash();
   }
 }
 

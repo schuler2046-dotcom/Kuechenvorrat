@@ -7,12 +7,41 @@ Installierbare PWA (vanilla HTML/CSS/JS, kein Build-Step), Echtzeit-Sync über F
 
 ## Funktionen
 
-- **Vorrat**: Artikel nach Lagerort (Gefriertruhe, Vorratsschrank, Kühlschrank) und Kategorie (Fleisch & Fisch, Gemüse & Obst, …), Schnellerfassung per Mehrzeilen-Eingabe oder Diktat über die Handy-Tastatur.
-- **Rezepte**: Tag-Filter, sortiert nach Verfügbarkeit der Zutaten, Schnell-Einfüge-Parser, KI-Vorschläge per Copy-Paste über die Claude-App (kostenlos).
-- **Wochenplan**: Gericht pro Wochentag, fehlende Zutaten auf Knopfdruck auf die Einkaufsliste.
-- **Einkauf**: geteilte Einkaufsliste, abhakbar, Abgehaktes wandert per Knopf in den Vorrat.
+- **Vorrat**: Artikel nach Lagerort (Gefriertruhe, Vorratsschrank, Kühlschrank) und Kategorie, Schnellerfassung per Mehrzeilen-Eingabe oder Diktat. Mengen in g, ml, stk oder **Packungen** (mit hinterlegtem Inhalt je Packung, z. B. 1 Packung = 1 kg Mehl). Plus/Minus ändert je Einheit sinnvoll (g/ml ±50, Stück/Packung ±1).
+- **Rezepte**: Bildkarten mit Suche, Filter (Alle, Kochbar jetzt, süß, deftig, eigene Kategorien), Detailansicht mit Portionsrechner, Zutaten-Status gegen den Vorrat (genug, knapp, fehlt, Ersatz), Zubereitung, Link zum Original. Jedes Rezept lässt sich von Hand bearbeiten (Mengen, Einheiten, Schritte, Bild). KI-Vorschläge per Copy-Paste über die Claude-App.
+- **Zutaten-Abgleich**: erkennt Öl = Olivenöl, Plural, Beiwörter (rote Zwiebel = Zwiebel), Ersatz (Rapsöl für Olivenöl), Grundvorrat (Salz, Pfeffer, Wasser) und lernt eigene Zuordnungen („Hab ich anders“). Große Mengen (Mehl, Nudeln, Reis …) werden in Gramm geprüft, Gewürze und Kleinmengen nur auf „vorhanden?“.
+- **Kochmodus** mit Display-an und Portionsrechner. Am Ende **„Gekocht – Zutaten abbuchen“**: zeigt je Zutat, was aus dem Vorrat abgezogen wird, ein Klick bucht ab, Rückgängig möglich.
+- **Wochenplan**: Gericht pro Wochentag, fehlende Zutaten mit Fehlmenge auf Knopfdruck auf die Einkaufsliste.
+- **Einkauf**: geteilte Einkaufsliste, abhakbar, Abgehaktes wandert (einheitenbewusst) in den Vorrat.
+- **Instagram-Import**: Einstellungen → „Instagram-Rezepte importieren“ spielt die Datei aus der Instagram-Sync ein (additiv, Titelbilder privat in Firestore).
 - **Sync**: Änderungen erscheinen sofort auf allen Geräten (Firestore `onSnapshot`), offline nutzbar mit automatischem Abgleich.
-- **Datensicherung**: JSON-Export/-Import im Fußbereich der App.
+- **Datensicherung**: JSON-Export/-Import in den Einstellungen (Titelbilder sind nicht enthalten).
+
+## Aufbau
+
+Vanilla JS als ES-Module, kein Build-Step.
+
+| Datei | Inhalt |
+|---|---|
+| `app.js` | Zustand, Rendering, Events, Routing (`#/rezept/<id>`, `/kochen`, `/bearbeiten`, `/gekocht`, `#/neu`, `#/einstellungen`) |
+| `units.js` | Einheiten, Packungsgrößen, Umrechnung, Formatierung (rein) |
+| `matching.js` | Begriffsabgleich und Mengenprüfung Zutat ↔ Vorrat (rein) |
+| `cook.js` | Abbuchungsplan für „Gekocht“ (rein) |
+| `shopping.js` | Einkaufsbedarf aus Rezept-Bewertungen (rein) |
+| `ig-import.js` | Import-Datei der Instagram-Sync umwandeln (rein) |
+| `recipes-ui.js` | HTML-Bausteine für Karten, Detail, Editor, Abbuchen-Seite |
+| `store.js` | Firestore bzw. lokaler Speicher, `readKey`/`writeKey` für einzelne Dokumente (Bilder) |
+| `parse.js`, `ai.js`, `voice.js`, `images.js`, `constants.js`, `util.js` | Parser, KI-Prompts, Sprache, Bildverkleinerung, Konstanten |
+
+Erweiterte Datenfelder (alle optional, Schema nur additiv): Vorratsartikel `packSize`/`packUnit`; Rezepte `servings`, `category`, `source`, `igId`, `sourceUrl`, `author`, `status`, `hasImage`, Zutat `note`/`approx`; `meta`: `staples`, `aliases`, `aliasNames`, `packSizes`, `recipeCategories`, `cookLog`, `undo`. Titelbilder liegen als Dokument `data/img-<rezeptId>` (`{json: {dataUrl}}`).
+
+## Tests
+
+```
+npm test
+```
+
+Führt die Unit-Tests der reinen Module (`tests/*.test.js`) mit dem eingebauten Node-Testrunner aus (Node 20+).
 
 ## Datensicherheits-Prinzipien (verbindlich für alle künftigen Änderungen)
 
@@ -22,7 +51,7 @@ Installierbare PWA (vanilla HTML/CSS/JS, kein Build-Step), Echtzeit-Sync über F
 4. Schreibvorgänge sind Read-before-write (Firestore-Transaktionen) pro Dokument.
 5. JSON-Export/-Import als Sicherheitsnetz; Import ist rein additiv und löscht nie.
 
-**Bei jedem Update der App-Dateien: `CACHE`-Version in `sw.js` hochzählen** (`vorrat-vN`),
+**Bei jedem Update der App-Dateien: `CACHE`-Version in `sw.js` hochzählen** (`vorrat-vN` (aktuell v16)),
 sonst liefern installierte Home-Screen-Apps die alte Version aus.
 
 ## Firebase einrichten (einmalig, ~10 Minuten)
