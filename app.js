@@ -8,6 +8,10 @@ import { uid, escapeHtml } from './util.js';
 import { parseIngredientLine, normalizeIngredient } from './parse.js';
 import { buildAiPrompt, buildPhotoPrompt, parseAiRecipes, parsePhotoItems } from './ai.js';
 import { spokenToLines } from './voice.js';
+import {
+  parseAmount, canonicalUnit, isItemUnit, stepFor, formatQuantity, addAmounts,
+  suggestPackSize, UNIT_OPTIONS
+} from './units.js';
 
 const HOUSEHOLD_LS_KEY = 'vorrat-household';
 
@@ -147,6 +151,31 @@ function availabilityBadge(recipe){
 
 function itemCategory(item){
   return (item.category && CATEGORIES.includes(item.category)) ? item.category : 'Sonstiges';
+}
+
+// Packungsgröße für einen Artikelnamen: zuerst die gemerkte (meta.packSizes), sonst ein
+// üblicher Vorschlag, sonst nichts. Rückgabe {size, unit} oder null.
+function packHint(name){
+  const key = String(name || '').trim().toLowerCase();
+  const saved = meta && meta.packSizes && meta.packSizes[key];
+  if(saved && saved.size) return saved;
+  return suggestPackSize(name);
+}
+
+// Ergänzt einen neuen Vorratsartikel um die Packungsgröße, wenn die Einheit ein Gebinde ist.
+function withPackSize(item){
+  if(!isItemUnit(item.unit) || item.packSize) return item;
+  const hint = packHint(item.name);
+  return hint ? { ...item, packSize: hint.size, packUnit: hint.unit } : item;
+}
+
+function unitSelectOptions(current){
+  const cur = String(current || '').trim();
+  const known = UNIT_OPTIONS.includes(canonicalUnit(cur)) ? canonicalUnit(cur) : null;
+  const opts = ['', ...UNIT_OPTIONS];
+  if(cur && !known) opts.push(cur);
+  const sel = known !== null ? known : cur;
+  return opts.map(u => `<option value="${escapeHtml(u)}" ${u===sel?'selected':''}>${u ? escapeHtml(u) : '(ohne)'}</option>`).join('');
 }
 
 function openShoppingCount(){
@@ -301,15 +330,24 @@ function renderHouseholdScreen(){
   `;
 }
 
+// Kleiner Zusatz unter dem Artikelnamen: Inhalt je Packung bzw. Hinweis, dass er fehlt.
+function packInfoHtml(i){
+  if(!isItemUnit(i.unit)) return '';
+  if(parseAmount(i.packSize)){
+    return `<span class="item-sub">je ${escapeHtml(formatQuantity(i.packSize, i.packUnit || 'g'))}</span>`;
+  }
+  return '<span class="item-sub warn">Inhalt je Packung eintragen (✎)</span>';
+}
+
 // Eine Vorratszeile: normal (großer Stepper + Bearbeiten) oder als Bearbeiten-Formular.
 function renderItemRow(i){
   if(i.id === editingItemId) return renderItemEdit(i);
   return `
     <div class="item-row" data-item-id="${i.id}">
-      <span class="item-name">${escapeHtml(i.name)}</span>
+      <span class="item-name">${escapeHtml(i.name)}${packInfoHtml(i)}</span>
       <span class="item-stepper">
         <button class="step-btn" data-action="dec-item" aria-label="Menge verringern">−</button>
-        <span class="item-qty">${escapeHtml(String(i.amount))}${i.unit ? ' '+escapeHtml(i.unit) : ''}</span>
+        <span class="item-qty">${escapeHtml(formatQuantity(i.amount, i.unit))}</span>
         <button class="step-btn" data-action="inc-item" aria-label="Menge erhöhen">+</button>
       </span>
       <button class="edit-btn" data-action="edit-item" aria-label="Artikel bearbeiten" title="Bearbeiten: Ort, Kategorie, löschen">✎</button>
@@ -327,7 +365,14 @@ function renderItemEdit(i){
         <input type="text" class="edit-name" value="${escapeHtml(i.name)}" placeholder="Artikel">
         <div class="edit-line">
           <input type="number" class="qty-input edit-amount" value="${escapeHtml(String(i.amount))}" min="0" step="any" placeholder="Menge">
-          <input type="text" class="unit-input edit-unit" value="${escapeHtml(i.unit||'')}" placeholder="Einheit">
+          <select class="unit-select edit-unit" data-action="edit-unit-change">${unitSelectOptions(i.unit)}</select>
+        </div>
+        <div class="edit-line edit-pack" ${isItemUnit(i.unit) ? '' : 'hidden'}>
+          <span class="pack-label">1 ${escapeHtml(canonicalUnit(i.unit) || 'Packung')} enthält</span>
+          <input type="number" class="qty-input edit-pack-size" value="${escapeHtml(String(i.packSize || ''))}" min="0" step="any" placeholder="z. B. 500">
+          <select class="unit-select edit-pack-unit">
+            ${['g', 'ml', 'stk'].map(u => `<option value="${u}" ${(i.packUnit || 'g')===u?'selected':''}>${u}</option>`).join('')}
+          </select>
         </div>
         <div class="edit-line">
           <label class="edit-field"><span>Lagerort</span><select class="edit-loc">${locOpts}</select></label>
@@ -397,7 +442,7 @@ function renderLocBlocks(){
         <div class="add-row">
           <input type="text" placeholder="Artikel" class="new-item-name" data-loc="${loc}">
           <input type="number" placeholder="Menge" class="qty-input new-item-qty" data-loc="${loc}" value="1" min="0">
-          <input type="text" placeholder="Einheit" class="unit-input new-item-unit" data-loc="${loc}">
+          <select class="unit-select new-item-unit" data-loc="${loc}">${unitSelectOptions('')}</select>
           <select class="new-item-cat" data-loc="${loc}">
             ${CATEGORIES.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('')}
           </select>
@@ -788,7 +833,7 @@ async function addItem(loc){
   const catInput = document.querySelector(`.new-item-cat[data-loc="${loc}"]`);
   const name = nameInput.value.trim();
   if(!name) return;
-  const newItem = { id: uid(), name, amount: qtyInput.value || '1', unit: unitInput.value.trim(), location: loc, category: catInput.value };
+  const newItem = withPackSize({ id: uid(), name, amount: qtyInput.value || '1', unit: canonicalUnit(unitInput.value), location: loc, category: catInput.value });
   inventory = await mutateShared('inventory', inventory, (inv) => { inv.push(newItem); return inv; });
   render();
 }
@@ -799,8 +844,8 @@ async function bulkAdd(){
   const cat = document.getElementById('bulk-add-cat').value;
   const lines = (ta ? ta.value : bulkDraft).split('\n').map(l=>l.trim()).filter(Boolean);
   if(!lines.length) return;
-  const newItems = lines.map(parseIngredientLine).filter(Boolean).map(p => ({
-    id: uid(), name: p.name, amount: p.amount || '1', unit: p.unit || '', location: loc, category: cat
+  const newItems = lines.map(parseIngredientLine).filter(Boolean).map(p => withPackSize({
+    id: uid(), name: p.name, amount: p.amount || '1', unit: canonicalUnit(p.unit), location: loc, category: cat
   }));
   inventory = await mutateShared('inventory', inventory, (inv) => { newItems.forEach(it => inv.push(it)); return inv; });
   bulkDraft = '';
@@ -813,10 +858,12 @@ async function changeItem(id, action){
     const item = inv.find(i => i.id === id);
     if(!item) return inv;
     if(action === 'del-item') return inv.filter(i => i.id !== id);
-    let n = parseFloat(String(item.amount).replace(',','.')) || 0;
-    n += action === 'inc-item' ? 1 : -1;
-    if(n <= 0) return inv.filter(i => i.id !== id);
-    item.amount = n;
+    // Schrittweite richtet sich nach der Einheit (g/ml ±50, kg/l ±0,5, Stück/Packung ±1).
+    let n = parseAmount(item.amount) || 0;
+    const step = stepFor(item.unit);
+    n += action === 'inc-item' ? step : -step;
+    if(n <= 0.0001) return inv.filter(i => i.id !== id);
+    item.amount = Math.round(n * 1000) / 1000;
     return inv;
   });
   render();
@@ -834,11 +881,26 @@ async function saveItemEdit(id){
   const unit = row.querySelector('.edit-unit').value.trim();
   const location = row.querySelector('.edit-loc').value;
   const category = row.querySelector('.edit-cat').value;
+  const packSize = isItemUnit(unit) ? parseAmount(row.querySelector('.edit-pack-size').value) : null;
+  const packUnit = row.querySelector('.edit-pack-unit').value;
   inventory = await mutateShared('inventory', inventory, (inv) => {
     const it = inv.find(x => x.id === id);
-    if(it){ it.name = name; it.amount = amount || '1'; it.unit = unit; it.location = location; it.category = category; }
+    if(it){
+      it.name = name; it.amount = amount || '1'; it.unit = unit; it.location = location; it.category = category;
+      if(packSize){ it.packSize = packSize; it.packUnit = packUnit; }
+      else { delete it.packSize; delete it.packUnit; }
+    }
     return inv;
   });
+  // Packungsgröße je Artikelname merken, damit sie beim nächsten Einkauf vorbelegt ist.
+  if(packSize){
+    const key = name.toLowerCase();
+    meta = await mutateShared('meta', meta, (m) => {
+      m = m || {};
+      m.packSizes = { ...(m.packSizes || {}), [key]: { size: packSize, unit: packUnit } };
+      return m;
+    });
+  }
   editingItemId = null;
   statusMsg = 'Artikel aktualisiert.';
   render();
@@ -869,7 +931,7 @@ async function addShoppingItem(){
   const name = document.getElementById('new-shop-name').value.trim();
   if(!name) return;
   const amount = document.getElementById('new-shop-amount').value.trim();
-  const unit = document.getElementById('new-shop-unit').value.trim();
+  const unit = canonicalUnit(document.getElementById('new-shop-unit').value);
   const it = { id: uid(), name, amount, unit, checked: false, source: 'manuell' };
   shopping = await mutateShared('shopping', shopping, (list) => { list.push(it); return list; });
   render();
@@ -880,13 +942,18 @@ async function shopToInventory(){
   if(!doneItems.length) return;
   inventory = await mutateShared('inventory', inventory, (inv) => {
     doneItems.forEach(it => {
-      const existing = inv.find(x => x.name.trim().toLowerCase() === it.name.trim().toLowerCase());
-      if(existing){
-        const a = parseFloat(String(existing.amount).replace(',','.')) || 0;
-        const b = parseFloat(String(it.amount).replace(',','.')) || 0;
-        if(a && b){ existing.amount = a + b; }
+      const name = it.name.trim();
+      const amount = it.amount || '1';
+      const unit = canonicalUnit(it.unit);
+      const existing = inv.find(x => x.name.trim().toLowerCase() === name.toLowerCase());
+      // Mengen nur addieren, wenn die Einheiten zusammenpassen (1 l + 500 ml = 1,5 l);
+      // sonst als eigener Artikel anlegen statt zu verfälschen oder zu verschlucken.
+      const sum = existing ? addAmounts(existing.amount, existing.unit, amount, unit) : null;
+      if(sum){
+        existing.amount = sum.amount;
+        existing.unit = sum.unit;
       } else {
-        inv.push({ id: uid(), name: it.name.trim(), amount: it.amount || '1', unit: it.unit || '', location: 'Vorratsschrank', category: 'Sonstiges' });
+        inv.push(withPackSize({ id: uid(), name, amount, unit, location: existing ? existing.location : 'Vorratsschrank', category: existing ? itemCategory(existing) : 'Sonstiges' }));
       }
     });
     return inv;
@@ -1358,6 +1425,19 @@ function bindGlobalEvents(){
     }
     const el = e.target.closest('[data-action]');
     if(!el) return;
+    if(el.dataset.action === 'edit-unit-change'){
+      // Packungsgröße-Zeile nur bei Gebinde-Einheiten zeigen und mit dem Vorschlag vorbelegen.
+      const row = el.closest('.item-row');
+      const isItem = isItemUnit(el.value);
+      row.querySelector('.edit-pack').hidden = !isItem;
+      row.querySelector('.pack-label').textContent = '1 ' + (canonicalUnit(el.value) || 'Packung') + ' enthält';
+      const sizeInput = row.querySelector('.edit-pack-size');
+      if(isItem && !sizeInput.value){
+        const h = packHint(row.querySelector('.edit-name').value);
+        if(h){ sizeInput.value = h.size; row.querySelector('.edit-pack-unit').value = h.unit; }
+      }
+      return;
+    }
     if(el.dataset.action === 'set-day-recipe'){
       const day = el.dataset.day;
       const val = el.value;

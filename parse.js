@@ -1,6 +1,6 @@
 // Zutatenzeilen-Parser: zerlegt Texte wie "200 g Mehl" in Name, Menge und Einheit.
 
-const KNOWN_UNITS = ['g','kg','mg','ml','l','tl','el','stk','stück','dose','dosen','packung','päckchen','pck','prise','bund','zehe','zehen','stange','stangen','scheibe','scheiben','becher','glas','gläser','flasche','flaschen','tasse','tassen','kopf','köpfe','tüte','tüten','msp','messerspitze','esslöffel','teelöffel','liter','gramm','kilogramm','milliliter','blatt','blätter','zweig','zweige','handvoll','portion','portionen','würfel','riegel','tropfen'];
+import { unitInfo } from './units.js';
 
 // Zerlegt eine Zutaten-/Artikelzeile in Bezeichnung, Menge und Einheit. Erkennt die
 // Menge sowohl am Anfang ("200 g Mehl", "200g Mehl") als auch am Ende ("Mehl 200 g",
@@ -19,7 +19,8 @@ function cleanIngredientName(s){
 }
 
 function isKnownUnitWord(w){
-  return !!w && KNOWN_UNITS.includes(w.toLowerCase().replace(/\.+$/,''));
+  const k = String(w || '').toLowerCase().replace(/\.+$/,'');
+  return !!k && k !== 'x' && !!unitInfo(k);
 }
 
 export function parseIngredientLine(line){
