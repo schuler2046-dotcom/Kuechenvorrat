@@ -143,3 +143,12 @@ export async function writeKey(key, value){
   }
   localStorage.setItem(LOCAL_PREFIX + key, JSON.stringify(value));
 }
+
+// Dokument unter data/{key} löschen (z. B. ein Rezeptbild).
+export async function deleteKey(key){
+  if(mode === 'firebase'){
+    await F.deleteDoc(docRef(key));
+    return;
+  }
+  localStorage.removeItem(LOCAL_PREFIX + key);
+}

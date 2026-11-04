@@ -69,3 +69,44 @@ test('Datei mit Liste oder Objekt einlesen', () => {
   assert.equal(parseImportFile(JSON.stringify([raw, raw])).length, 2);
   assert.throws(() => parseImportFile('{"x":1}'));
 });
+
+import { makeBatch, nextBatch, planUndo, applyUndo, markUsed } from '../ig-import.js';
+
+test('Rückgängig: nur unbearbeitete Instagram-Rezepte der Charge werden gelöscht', () => {
+  const recipes = [
+    { id: 'ig-A', source: 'instagram', name: 'A' },
+    { id: 'ig-B', source: 'instagram', name: 'B', editedAt: '2026-11-05T10:00:00Z' },
+    { id: 'ig-C', source: 'instagram', name: 'C' },
+    { id: 'm1', source: 'manuell', name: 'Eigenes' }
+  ];
+  const batch = makeBatch([{ id: 'ig-A' }, { id: 'ig-B' }, { id: 'ig-GONE' }, { id: 'm1' }], '2026-11-04T12:00:00Z');
+  const plan = planUndo(batch, recipes);
+  assert.deepEqual(plan.remove, ['ig-A']);
+  assert.deepEqual(plan.edited, ['ig-B', 'm1']);
+  assert.deepEqual(plan.gone, ['ig-GONE']);
+  const left = applyUndo(recipes, plan);
+  assert.deepEqual(left.map(r => r.id), ['ig-B', 'ig-C', 'm1']);
+});
+
+test('Rückgängig: eine Charge nur einmal, danach verbraucht', () => {
+  const b1 = makeBatch([{ id: 'ig-1' }], '2026-11-04T12:00:00Z');
+  const b2 = makeBatch([{ id: 'ig-2' }], '2026-12-01T12:00:00Z');
+  let batches = [b2, b1];
+  assert.equal(nextBatch(batches).id, b2.id);
+  batches = markUsed(batches, b2.id, '2026-12-02T00:00:00Z');
+  assert.equal(batches[0].used, true);
+  assert.equal(nextBatch(batches).id, b1.id);
+  assert.equal(nextBatch(markUsed(batches, b1.id)), null);
+  assert.equal(nextBatch([]), null);
+  assert.equal(nextBatch(undefined), null);
+});
+
+test('Rückgängig zweimal auf derselben Liste löscht nichts Weiteres', () => {
+  const recipes = [{ id: 'ig-A', source: 'instagram', name: 'A' }];
+  const batch = makeBatch(recipes);
+  const once = applyUndo(recipes, planUndo(batch, recipes));
+  assert.equal(once.length, 0);
+  const plan2 = planUndo(batch, once);
+  assert.deepEqual(plan2.remove, []);
+  assert.deepEqual(plan2.gone, ['ig-A']);
+});

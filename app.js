@@ -2,7 +2,7 @@
 // UI-Logik, portiert vom Claude-Artifact (referenz/kuechenvorrat-artifact.html),
 // Datenzugriff über store.js (Firestore-Echtzeit-Sync bzw. lokaler Fallback).
 
-import { initStore, mutate, storeMode, readKey, writeKey, DATA_KEYS } from './store.js';
+import { initStore, mutate, storeMode, readKey, writeKey, deleteKey, DATA_KEYS } from './store.js';
 import { LOCATIONS, CATEGORIES, TAGS, DAYS } from './constants.js';
 import { uid, escapeHtml } from './util.js';
 import { parseIngredientLine, normalizeIngredient } from './parse.js';
@@ -12,7 +12,7 @@ import { evaluateIngredient, evaluateRecipe, normKey, DEFAULT_STAPLES } from './
 import { recipeCardHtml, recipeDetailHtml, editorHtml, cookSheetHtml } from './recipes-ui.js';
 import { planDeduction, defaultOn, applyDeduction, revertDeduction } from './cook.js';
 import { mergeNeeds, needsOfEvaluation } from './shopping.js';
-import { parseImportFile, normalizeIgRecipe, pickNew } from './ig-import.js';
+import { parseImportFile, normalizeIgRecipe, pickNew, makeBatch, nextBatch, planUndo, applyUndo, markUsed } from './ig-import.js';
 import { resizeToDataUrl } from './images.js';
 import {
   parseAmount, canonicalUnit, isItemUnit, stepFor, formatQuantity, addAmounts,
@@ -45,6 +45,7 @@ let cookSheet = null;
 let settingsOpen = false;
 let aiDetailsOpen = false;
 let igStatus = '';
+let igUndoConfirm = false;
 let aiPasteOpen = false;
 let aiSuggestions = null;
 let aiError = '';
@@ -224,7 +225,7 @@ function goBack(){
 function routeFromHash(){
   const parts = location.hash.replace(/^#\/?/, '').split('/').map(decodeURIComponent);
   const [a, id, sub] = parts;
-  viewRecipeId = null; cookingRecipeId = null; editing = null; cookSheet = null; settingsOpen = false; aliasFor = null;
+  viewRecipeId = null; cookingRecipeId = null; editing = null; cookSheet = null; settingsOpen = false; aliasFor = null; igUndoConfirm = false;
   if(a === 'rezept' && id){
     viewRecipeId = id;
     const r = recipes.find(x => x.id === id);
@@ -427,7 +428,8 @@ async function saveEdit(){
     zeit: e.zeit.trim() || undefined,
     sourceUrl: e.sourceUrl.trim() || undefined,
     source: base.source || 'manuell',
-    status: 'ok'
+    status: 'ok',
+    editedAt: new Date().toISOString()
   };
   // Waren die Schritte bisher im Notizfeld, würden sie sonst doppelt erscheinen.
   if(!(base.steps && base.steps.length) && steps.length) rec.notes = '';
@@ -580,6 +582,7 @@ function renderSettings(){
         <div class="recipe-controls"><button class="btn small" data-action="ig-import">Datei auswählen</button></div>
         <input type="file" id="ig-file" accept="application/json,.json" style="display:none;">
         <div class="status-line" id="ig-status">${escapeHtml(igStatus)}</div>
+        ${igUndoBoxHtml()}
       </div>
       <div class="card">
         <h2>Daten</h2>
@@ -1212,6 +1215,58 @@ async function deleteItemEdit(id){
   render();
 }
 
+// Löscht die Rezepte der letzten Import-Charge, außer von Hand bearbeitete. Bilder werden mitgelöscht.
+async function undoInstagramImport(){
+  const batch = nextBatch(meta && meta.igBatches);
+  if(!batch) return;
+  let plan = null;
+  recipes = await mutateShared('recipes', recipes, (list) => {
+    plan = planUndo(batch, list);
+    return applyUndo(list, plan);
+  });
+  if(!plan) return;
+  for(const id of plan.remove){
+    try{ await deleteKey('img-' + id); }catch(e){ console.error(e); }
+    imageCache.delete(id);
+  }
+  if(plan.remove.length){
+    const gone = new Set(plan.remove);
+    weekplan = await mutateShared('weekplan', weekplan, (wp) => {
+      DAYS.forEach(d => { if(gone.has(wp[d])) delete wp[d]; });
+      return wp;
+    });
+  }
+  meta = await mutateShared('meta', meta, (m) => {
+    m = m || {};
+    m.igBatches = markUsed(m.igBatches, batch.id);
+    return m;
+  });
+  igUndoConfirm = false;
+  igStatus = plan.remove.length + ' Rezepte aus dem Import entfernt'
+    + (plan.edited.length ? ', ' + plan.edited.length + ' von dir bearbeitete blieben erhalten' : '') + '.';
+  render();
+}
+
+function igUndoBoxHtml(){
+  const batch = nextBatch(meta && meta.igBatches);
+  if(!batch) return '';
+  const plan = planUndo(batch, recipes);
+  const date = new Date(batch.at).toLocaleDateString('de-DE', { day: 'numeric', month: 'long' });
+  const head = `Letzter Import: ${escapeHtml(date)}, ${batch.ids.length} Rezepte.`;
+  if(!igUndoConfirm){
+    return `<div id="ig-undo-box" class="undo-box"><div class="status-line">${head}</div>
+      <button class="btn small secondary" data-action="ig-undo-ask">Letzten Instagram-Import rückgängig machen</button></div>`;
+  }
+  return `<div id="ig-undo-box" class="undo-box"><div class="status-line">${head}</div>
+    <p class="undo-warn"><strong>${plan.remove.length} Rezepte werden gelöscht</strong>, samt Titelbildern.
+    ${plan.edited.length ? `${plan.edited.length} davon hast du bearbeitet, sie bleiben erhalten. ` : ''}
+    ${plan.gone.length ? `${plan.gone.length} gibt es nicht mehr. ` : ''}Das lässt sich nicht zurücknehmen; der Import selbst kann danach erneut eingespielt werden.</p>
+    <div class="recipe-controls">
+      <button class="btn small danger" data-action="ig-undo-do" ${plan.remove.length ? '' : 'disabled'}>Endgültig rückgängig machen</button>
+      <button class="btn small secondary" data-action="ig-undo-cancel">Abbrechen</button>
+    </div></div>`;
+}
+
 function setIgStatus(msg){
   igStatus = msg;
   const el = document.getElementById('ig-status');
@@ -1240,11 +1295,22 @@ async function importInstagram(file){
       done++;
       setIgStatus('Bilder gespeichert: ' + done + ' von ' + add.length + ' …');
     }
+    let added = [];
     recipes = await mutateShared('recipes', recipes, (list) => {
-      pickNew(list, add).add.forEach(it => list.push(it.recipe));
+      added = pickNew(list, add).add.map(it => it.recipe);
+      added.forEach(r => list.push(r));
       return list;
     });
-    setIgStatus(add.length + ' neue Rezepte importiert, ' + skipped + ' waren schon vorhanden.');
+    if(added.length){
+      const batch = makeBatch(added);
+      meta = await mutateShared('meta', meta, (m) => {
+        m = m || {};
+        m.igBatches = [batch, ...(m.igBatches || [])].slice(0, 5);
+        return m;
+      });
+    }
+    setIgStatus(added.length + ' neue Rezepte importiert, ' + skipped + ' waren schon vorhanden.');
+    if(settingsOpen) render();
   }catch(e){
     console.error(e);
     setIgStatus('Import fehlgeschlagen: ' + e.message);
@@ -1631,6 +1697,9 @@ function bindGlobalEvents(){
       case 'sheet-confirm': await confirmCook(); break;
       case 'undo-cook': await undoCook(); break;
       case 'ig-import': document.getElementById('ig-file').click(); break;
+      case 'ig-undo-ask': igUndoConfirm = true; render(); break;
+      case 'ig-undo-cancel': igUndoConfirm = false; render(); break;
+      case 'ig-undo-do': await undoInstagramImport(); break;
       case 'edit-img-pick': document.getElementById('edit-img-file').click(); break;
       case 'edit-img-clear': editing.newImage = null; editing.removeImage = true; render(); break;
       case 'portions-inc': viewPortions += 1; render(); break;

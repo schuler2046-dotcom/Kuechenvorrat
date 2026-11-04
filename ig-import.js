@@ -80,3 +80,40 @@ export function pickNew(existing, incoming){
   }
   return { add, skipped };
 }
+
+// ---------- Import rückgängig machen ----------
+// Jeder Import wird als Charge gespeichert (meta.igBatches). Rückgängig löscht nur Rezepte dieser
+// Charge, die seit dem Import nicht von Hand bearbeitet wurden (editedAt gesetzt = geschützt).
+
+export function makeBatch(recipes, at = new Date().toISOString()){
+  return { id: 'batch-' + at, at, ids: recipes.map(r => r.id) };
+}
+
+// Neueste Charge, die noch nicht rückgängig gemacht wurde (Liste ist neueste zuerst).
+export function nextBatch(batches){
+  return (batches || []).find(b => !b.used) || null;
+}
+
+// Was passiert beim Rückgängig? remove = wird gelöscht, edited = bearbeitet (bleibt),
+// gone = existiert nicht mehr. Nur Instagram-Rezepte werden je gelöscht.
+export function planUndo(batch, recipes){
+  const byId = new Map(recipes.map(r => [r.id, r]));
+  const plan = { remove: [], edited: [], gone: [] };
+  for(const id of batch.ids){
+    const r = byId.get(id);
+    if(!r) plan.gone.push(id);
+    else if(r.source !== 'instagram' || r.editedAt) plan.edited.push(id);
+    else plan.remove.push(id);
+  }
+  return plan;
+}
+
+export function applyUndo(recipes, plan){
+  const rm = new Set(plan.remove);
+  return recipes.filter(r => !rm.has(r.id));
+}
+
+// Liste der Chargen nach dem Rückgängig: die Charge bleibt stehen, ist aber verbraucht.
+export function markUsed(batches, id, at = new Date().toISOString()){
+  return (batches || []).map(b => b.id === id ? { ...b, used: true, usedAt: at } : b);
+}
