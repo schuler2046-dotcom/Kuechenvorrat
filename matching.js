@@ -249,7 +249,7 @@ export function evaluateIngredient(ing, inventory, ctx = {}, factor = 1){
   }
 
   const staples = ctx.staples || DEFAULT_STAPLES;
-  const parts = name.split(/\s+und\s+/i);
+  const parts = name.split(/\s+und\s+|\s*,\s*/i);
   if(parts.length > 1 && parts.every(p => isStaple(p, staples))){
     return { status: 'grundvorrat', items: [], substitute: false };
   }

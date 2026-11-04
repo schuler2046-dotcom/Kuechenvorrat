@@ -21,6 +21,8 @@ test('Salz trifft nicht Salzstangen, Grundvorrat wird nie fehlen', () => {
   assert.equal(matchItems('Salz', inv({ name: 'Salzstangen' }), { staples: [] }).items.length, 0);
   assert.equal(evaluateIngredient({ name: 'Salz' }, []).status, 'grundvorrat');
   assert.equal(evaluateIngredient({ name: 'Salz und Pfeffer', amount: '' }, []).status, 'grundvorrat');
+  assert.equal(evaluateIngredient({ name: 'Salz, Pfeffer' }, []).status, 'grundvorrat');
+  assert.equal(evaluateIngredient({ name: 'Salz, Paprika' }, []).status, 'fehlt');
   assert.ok(isStaple('Wasser'));
   assert.ok(!isStaple('Zucker'));
 });
