@@ -2,7 +2,7 @@
 // UI-Logik, portiert vom Claude-Artifact (referenz/kuechenvorrat-artifact.html),
 // Datenzugriff über store.js (Firestore-Echtzeit-Sync bzw. lokaler Fallback).
 
-import { initStore, mutate, storeMode, DATA_KEYS } from './store.js';
+import { initStore, mutate, storeMode, readKey, writeKey, DATA_KEYS } from './store.js';
 import { LOCATIONS, CATEGORIES, TAGS, DAYS } from './constants.js';
 import { uid, escapeHtml } from './util.js';
 import { parseIngredientLine, normalizeIngredient } from './parse.js';
@@ -11,9 +11,12 @@ import { spokenToLines } from './voice.js';
 import { evaluateIngredient, evaluateRecipe, normKey, DEFAULT_STAPLES } from './matching.js';
 import { recipeCardHtml, recipeDetailHtml, editorHtml, cookSheetHtml } from './recipes-ui.js';
 import { planDeduction, defaultOn, applyDeduction, revertDeduction } from './cook.js';
+import { mergeNeeds, needsOfEvaluation } from './shopping.js';
+import { parseImportFile, normalizeIgRecipe, pickNew } from './ig-import.js';
+import { resizeToDataUrl } from './images.js';
 import {
   parseAmount, canonicalUnit, isItemUnit, stepFor, formatQuantity, addAmounts,
-  suggestPackSize, metricParts, partsFromBase, UNIT_OPTIONS
+  suggestPackSize, UNIT_OPTIONS
 } from './units.js';
 
 const HOUSEHOLD_LS_KEY = 'vorrat-household';
@@ -41,6 +44,7 @@ let editing = null;
 let cookSheet = null;
 let settingsOpen = false;
 let aiDetailsOpen = false;
+let igStatus = '';
 let aiPasteOpen = false;
 let aiSuggestions = null;
 let aiError = '';
@@ -143,10 +147,6 @@ function ingredientAvailable(name){
   return evaluateIngredient({ name }, inventory, matchCtx()).status !== 'fehlt';
 }
 
-function missingIngredients(recipe){
-  return evalRecipe(recipe).missing.map(row => row.ing);
-}
-
 function recipeCategories(){
   const list = meta && Array.isArray(meta.recipeCategories) && meta.recipeCategories.length ? meta.recipeCategories : null;
   return list || ['süß', 'deftig'];
@@ -167,8 +167,42 @@ function recipeSteps(r){
 
 // Titelbild eines Rezepts (Data-URL) oder null, solange es nicht geladen ist.
 const imageCache = new Map();
+const imageLoading = new Set();
 function getImage(r){
   return imageCache.get(r.id) || null;
+}
+
+function applyImageToDom(id, url){
+  document.querySelectorAll('[data-img-for="' + CSS.escape(id) + '"]').forEach(el => {
+    const ph = el.querySelector('.ph');
+    if(ph) ph.remove();
+    if(!el.querySelector('img')){
+      const img = document.createElement('img');
+      img.src = url;
+      img.alt = '';
+      el.prepend(img);
+    }
+  });
+}
+
+// Lädt das Titelbild eines Rezepts aus der Datenbank (Dokument "img-<id>") und setzt es ein.
+async function loadImage(id){
+  if(imageCache.has(id) || imageLoading.has(id)) return;
+  imageLoading.add(id);
+  const v = await readKey('img-' + id, null);
+  imageLoading.delete(id);
+  const url = v && v.dataUrl ? v.dataUrl : '';
+  imageCache.set(id, url);
+  if(url) applyImageToDom(id, url);
+}
+
+// Lädt die Bilder aller aktuell sichtbaren Karten bzw. des Detail-Titelbilds nach.
+function loadVisibleImages(){
+  document.querySelectorAll('[data-img-for]').forEach(el => {
+    const id = el.dataset.imgFor;
+    const r = recipes.find(x => x.id === id);
+    if(r && r.hasImage) loadImage(id);
+  });
 }
 
 // ---------- Navigation (Hash-Routen, damit die Zurück-Taste funktioniert) ----------
@@ -339,7 +373,7 @@ function renderRecipeDetail(){
   if(!r){ viewRecipeId = null; return ''; }
   const ev = evalRecipe(r, viewPortions / (r.servings || 2));
   const names = [...new Set(inventory.map(i => String(i.name).trim()))].sort((a, b) => a.localeCompare(b, 'de'));
-  return recipeDetailHtml({ r, ev, portions: viewPortions, img: getImage(r), aliasFor, inventoryNames: names, cookInfo: cookStats(r.id) });
+  return recipeDetailHtml({ r, ev, portions: viewPortions, img: getImage(r), aliasFor, inventoryNames: names, cookInfo: cookStats(r.id), steps: recipeSteps(r) });
 }
 
 function beginEdit(id){
@@ -354,6 +388,9 @@ function beginEdit(id){
     zeit: r ? (r.zeit || '') : '',
     sourceUrl: r ? (r.sourceUrl || '') : '',
     tags: r ? [...(r.tags || [])] : [],
+    img: r && r.hasImage ? (imageCache.get(r.id) || null) : null,
+    newImage: null,
+    removeImage: false,
     ingredients: r ? (r.ingredients || []).map(i => ({
       name: i.name || '', amount: String(i.amount ?? ''), unit: i.unit || '', note: i.note || '', approx: !!i.approx
     })) : [],
@@ -394,6 +431,20 @@ async function saveEdit(){
   };
   // Waren die Schritte bisher im Notizfeld, würden sie sonst doppelt erscheinen.
   if(!(base.steps && base.steps.length) && steps.length) rec.notes = '';
+  try{
+    if(e.newImage){
+      await writeKey('img-' + rec.id, { dataUrl: e.newImage });
+      imageCache.set(rec.id, e.newImage);
+      rec.hasImage = true;
+    } else if(e.removeImage && base.hasImage){
+      await writeKey('img-' + rec.id, { dataUrl: '' });
+      imageCache.set(rec.id, '');
+      rec.hasImage = false;
+    }
+  }catch(err){
+    console.error(err);
+    statusMsg = 'Das Bild konnte nicht gespeichert werden. Das Rezept wird ohne neues Bild gesichert.';
+  }
   recipes = await mutateShared('recipes', recipes, (list) => {
     const i = list.findIndex(x => x.id === rec.id);
     if(i >= 0) list[i] = rec; else list.push(rec);
@@ -524,8 +575,15 @@ function renderSettings(){
         ${aliasRows ? `<ul class="shopping-list">${aliasRows}</ul>` : '<div class="empty-note">Noch keine Zuordnungen.</div>'}
       </div>
       <div class="card">
+        <h2>Instagram-Rezepte importieren</h2>
+        <div class="status-line">Datei aus der Instagram-Sync einspielen. Schon vorhandene Rezepte – auch von Hand geänderte – bleiben unverändert, es kommt nur Neues dazu.</div>
+        <div class="recipe-controls"><button class="btn small" data-action="ig-import">Datei auswählen</button></div>
+        <input type="file" id="ig-file" accept="application/json,.json" style="display:none;">
+        <div class="status-line" id="ig-status">${escapeHtml(igStatus)}</div>
+      </div>
+      <div class="card">
         <h2>Daten</h2>
-        <div class="status-line">Rezepte belegen ${kb} KB von rund 1000 KB in der Datenbank${full ? ' – bald voll, bitte melden.' : '.'}</div>
+        <div class="status-line">Rezepte belegen ${kb} KB von rund 1000 KB in der Datenbank${full ? ' – bald voll, bitte melden.' : '. Titelbilder liegen getrennt und zählen nicht mit; sie sind nicht in der Sicherung enthalten.'}</div>
         <div class="recipe-controls">
           <button class="btn small secondary" data-action="export-json">Daten sichern (Export)</button>
           <button class="btn small secondary" data-action="import-json">Sicherung einspielen (Import)</button>
@@ -545,6 +603,11 @@ function scheduleRender(){
 }
 
 function render(){
+  renderInner();
+  loadVisibleImages();
+}
+
+function renderInner(){
   pendingRender = false;
   evalCache.clear();
   const app = document.getElementById('app');
@@ -879,7 +942,7 @@ function recipeCountText(){
 // Aktualisiert nur Liste und Zähler, damit das Suchfeld beim Tippen den Fokus behält.
 function refreshRecipeList(){
   const grid = document.getElementById('recipe-grid');
-  if(grid) grid.innerHTML = renderRecipeGrid();
+  if(grid){ grid.innerHTML = renderRecipeGrid(); loadVisibleImages(); }
   const info = document.getElementById('recipe-count');
   if(info) info.textContent = recipeCountText();
 }
@@ -974,9 +1037,10 @@ function renderWochenplan(){
     const options = recipes.map(r => `<option value="${r.id}" ${r.id===recipeId?'selected':''}>${escapeHtml(r.name)}</option>`).join('');
     let inner = '';
     if(recipe){
-      const missing = missingIngredients(recipe);
-      inner = missing.length
-        ? `<div class="status-line" style="margin-top:6px;">Fehlt noch: ${missing.map(i=>escapeHtml(i.name)).join(', ')}</div>`
+      const ev = evalRecipe(recipe);
+      const lacking = [...ev.missing.map(row => row.ing.name), ...ev.short.map(row => row.ing.name + ' (knapp)')];
+      inner = lacking.length
+        ? `<div class="status-line" style="margin-top:6px;">Fehlt noch: ${lacking.map(n => escapeHtml(n)).join(', ')}</div>`
         : `<div class="status-line" style="margin-top:6px; color:#5B7A52;">Alles vorrätig</div>`;
     }
     return `
@@ -993,13 +1057,13 @@ function renderWochenplan(){
     `;
   }).join('');
 
-  const missingNames = plannedMissingNames();
-  const alreadyListed = new Set(shopping.map(s => s.name.trim().toLowerCase()));
-  const newNames = missingNames.filter(n => !alreadyListed.has(n.trim().toLowerCase()));
-  const missingHtml = missingNames.length
-    ? `<ul class="shopping-list">${missingNames.map(n=>`<li><span class="shop-name">${escapeHtml(n)}</span>${alreadyListed.has(n.trim().toLowerCase())?'<span class="shop-src">schon auf der Liste</span>':''}</li>`).join('')}</ul>
+  const needs = plannedNeeds();
+  const listedKeys = new Set(shopping.filter(s => !s.checked).map(s => normKey(s.name)));
+  const newNeeds = needs.filter(n => !listedKeys.has(normKey(n.name)));
+  const missingHtml = needs.length
+    ? `<ul class="shopping-list">${needs.map(n=>`<li><span class="shop-name">${escapeHtml(n.name)}${n.amount ? ' – ' + escapeHtml(formatQuantity(n.amount, n.unit)) : ''}</span>${listedKeys.has(normKey(n.name))?'<span class="shop-src">schon auf der Liste</span>':''}</li>`).join('')}</ul>
        <div class="recipe-controls" style="margin-top:10px;">
-         <button class="btn small" data-action="missing-to-shopping" ${newNames.length===0?'disabled':''}>${newNames.length ? newNames.length + ' fehlende Zutaten auf die Einkaufsliste' : 'Alles schon auf der Einkaufsliste'}</button>
+         <button class="btn small" data-action="missing-to-shopping" ${newNeeds.length===0?'disabled':''}>${newNeeds.length ? newNeeds.length + ' fehlende Zutaten auf die Einkaufsliste' : 'Alles schon auf der Einkaufsliste'}</button>
        </div>`
     : '<div class="empty-note">Für die geplanten Gerichte ist alles da, oder es ist noch nichts geplant.</div>';
 
@@ -1018,14 +1082,10 @@ function renderWochenplan(){
   `;
 }
 
-function plannedMissingNames(){
-  const plannedRecipes = Object.values(weekplan).map(id => recipes.find(r=>r.id===id)).filter(Boolean);
-  const missingMap = {};
-  plannedRecipes.forEach(r => missingIngredients(r).forEach(ing => {
-    const key = ing.name.trim().toLowerCase();
-    if(!missingMap[key]) missingMap[key] = ing.name;
-  }));
-  return Object.values(missingMap);
+// Fehlende und knappe Zutaten aller geplanten Gerichte, gleiche Zutaten zusammengefasst.
+function plannedNeeds(){
+  const planned = Object.values(weekplan).map(id => recipes.find(r => r.id === id)).filter(Boolean);
+  return mergeNeeds(planned.flatMap(r => needsOfEvaluation(evalRecipe(r), 1)));
 }
 
 function renderEinkauf(){
@@ -1152,6 +1212,45 @@ async function deleteItemEdit(id){
   render();
 }
 
+function setIgStatus(msg){
+  igStatus = msg;
+  const el = document.getElementById('ig-status');
+  if(el) el.textContent = msg;
+}
+
+// Spielt die Sync-Datei ein: Bilder zuerst (eigene Dokumente), dann alle neuen Rezepte in einer Transaktion.
+async function importInstagram(file){
+  try{
+    setIgStatus('Datei wird gelesen …');
+    const items = parseImportFile(await file.text()).map(r => normalizeIgRecipe(r)).filter(Boolean);
+    const { add, skipped } = pickNew(recipes, items);
+    if(!add.length){ setIgStatus('Nichts Neues: ' + skipped + ' Rezepte waren schon vorhanden.'); return; }
+    const size = new Blob([JSON.stringify([...recipes, ...add.map(a => a.recipe)])]).size;
+    if(size > 900 * 1024){
+      setIgStatus('Abgebrochen: Die Rezepte würden die Datenbank-Grenze (rund 1 MB) überschreiten. Nichts wurde geändert.');
+      return;
+    }
+    let done = 0;
+    for(const it of add){
+      if(!it.recipe.id) it.recipe.id = uid();
+      if(it.imageData){
+        await writeKey('img-' + it.recipe.id, { dataUrl: it.imageData });
+        imageCache.set(it.recipe.id, it.imageData);
+      }
+      done++;
+      setIgStatus('Bilder gespeichert: ' + done + ' von ' + add.length + ' …');
+    }
+    recipes = await mutateShared('recipes', recipes, (list) => {
+      pickNew(list, add).add.forEach(it => list.push(it.recipe));
+      return list;
+    });
+    setIgStatus(add.length + ' neue Rezepte importiert, ' + skipped + ' waren schon vorhanden.');
+  }catch(e){
+    console.error(e);
+    setIgStatus('Import fehlgeschlagen: ' + e.message);
+  }
+}
+
 function catsOf(m){
   return m && Array.isArray(m.recipeCategories) && m.recipeCategories.length ? m.recipeCategories : ['süß', 'deftig'];
 }
@@ -1188,15 +1287,7 @@ async function recipeToShopping(id){
   if(!r) return;
   const factor = viewPortions / (r.servings || 2);
   const ev = evalRecipe(r, factor);
-  const needs = [...ev.missing, ...ev.short].map(row => {
-    let p;
-    if(row.status === 'knapp') p = partsFromBase(row.dim, row.short);
-    else {
-      const n = parseAmount(row.ing.amount);
-      p = n === null ? { amount: '', unit: '' } : metricParts(n * factor, row.ing.unit);
-    }
-    return { name: row.ing.name, amount: p.amount === '' ? '' : String(p.amount), unit: p.unit };
-  });
+  const needs = needsOfEvaluation(ev, factor);
   let added = 0;
   shopping = await mutateShared('shopping', shopping, (list) => {
     needs.forEach(nd => {
@@ -1539,6 +1630,9 @@ function bindGlobalEvents(){
       case 'sheet-portions-dec': cookSheet.portions = Math.max(1, cookSheet.portions - 1); render(); break;
       case 'sheet-confirm': await confirmCook(); break;
       case 'undo-cook': await undoCook(); break;
+      case 'ig-import': document.getElementById('ig-file').click(); break;
+      case 'edit-img-pick': document.getElementById('edit-img-file').click(); break;
+      case 'edit-img-clear': editing.newImage = null; editing.removeImage = true; render(); break;
       case 'portions-inc': viewPortions += 1; render(); break;
       case 'portions-dec': viewPortions = Math.max(1, viewPortions - 1); render(); break;
       case 'cook-portions-inc': cookPortions += 1; render(); break;
@@ -1633,12 +1727,12 @@ function bindGlobalEvents(){
         render(); break;
       }
       case 'missing-to-shopping': {
-        const names = plannedMissingNames();
+        const needs = plannedNeeds();
         shopping = await mutateShared('shopping', shopping, (list) => {
-          const listed = new Set(list.map(s => s.name.trim().toLowerCase()));
-          names.forEach(n => {
-            if(!listed.has(n.trim().toLowerCase())){
-              list.push({ id: uid(), name: n, amount: '', unit: '', checked: false, source: 'plan' });
+          const listed = new Set(list.filter(s => !s.checked).map(s => normKey(s.name)));
+          needs.forEach(n => {
+            if(!listed.has(normKey(n.name))){
+              list.push({ id: uid(), name: n.name, amount: n.amount, unit: n.unit, checked: false, source: 'plan' });
             }
           });
           return list;
@@ -1751,6 +1845,21 @@ function bindGlobalEvents(){
   });
 
   app.addEventListener('change', async (e) => {
+    if(e.target && e.target.id === 'edit-img-file'){
+      const file = e.target.files && e.target.files[0];
+      e.target.value = '';
+      if(file && editing){
+        try{
+          editing.newImage = await resizeToDataUrl(file);
+          editing.removeImage = false;
+        }catch(err){
+          console.error(err);
+          statusMsg = 'Das Bild konnte nicht gelesen werden.';
+        }
+        render();
+      }
+      return;
+    }
     if(e.target && e.target.id === 'photo-file-input'){
       const file = e.target.files && e.target.files[0];
       if(file) handlePhotoSelected(file);
@@ -1844,6 +1953,12 @@ function bindGlobalEvents(){
   }, true);
 
   document.addEventListener('change', (e) => {
+    if(e.target && e.target.id === 'ig-file'){
+      const file = e.target.files && e.target.files[0];
+      if(file) importInstagram(file);
+      e.target.value = '';
+      return;
+    }
     if(e.target && e.target.id === 'import-file'){
       const file = e.target.files && e.target.files[0];
       if(file) importJson(file);

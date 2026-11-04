@@ -84,7 +84,7 @@ function ingredientRowHtml(row, idx, factor, aliasFor, inventoryNames){
 
 // Detailansicht eines Rezepts.
 export function recipeDetailHtml(o){
-  const { r, ev, portions, img, aliasFor, inventoryNames, cookInfo } = o;
+  const { r, ev, portions, img, aliasFor, inventoryNames, cookInfo, steps: stepList } = o;
   const base = r.servings || 2;
   const factor = portions / base;
   const notice = r.status === 'unvollstaendig'
@@ -99,8 +99,9 @@ export function recipeDetailHtml(o){
     cookInfo ? `<span>zuletzt gekocht: ${esc(cookInfo.last)}${cookInfo.count > 1 ? ' (' + cookInfo.count + '×)' : ''}</span>` : ''
   ].filter(Boolean).join('');
   const tags = (r.tags || []).map(t => `<span class="recipe-tag">${esc(t)}</span>`).join('');
-  const steps = (Array.isArray(r.steps) && r.steps.length)
-    ? `<ol class="detail-steps">${r.steps.map(s => `<li>${esc(s)}</li>`).join('')}</ol>`
+  const hasStepsField = Array.isArray(r.steps) && r.steps.length > 0;
+  const steps = (stepList && stepList.length)
+    ? `<ol class="detail-steps">${stepList.map(s => `<li>${esc(s)}</li>`).join('')}</ol>`
     : '<div class="empty-note">Noch keine Zubereitung hinterlegt.</div>';
   const ings = ev.rows.length
     ? `<ul class="detail-ings">${ev.rows.map((row, i) => ingredientRowHtml(row, i, factor, aliasFor, inventoryNames)).join('')}</ul>`
@@ -140,7 +141,7 @@ export function recipeDetailHtml(o){
       <section class="card">
         <h2>Zubereitung</h2>
         ${steps}
-        ${r.notes ? `<div class="recipe-notes">${esc(r.notes)}</div>` : ''}
+        ${r.notes && hasStepsField ? `<div class="recipe-notes">${esc(r.notes)}</div>` : ''}
         ${r.nutrition ? `<div class="recipe-notes">${esc(r.nutrition)}</div>` : ''}
       </section>
       <div class="detail-foot">
@@ -160,6 +161,7 @@ function unitOptionsFor(current){
 
 // Editor für neue und bestehende Rezepte.
 export function editorHtml(edit, categories){
+  const imgPreview = edit.newImage || (edit.removeImage ? null : edit.img);
   const catOpts = ['', ...categories].map(c => `<option value="${esc(c)}" ${c === (edit.category || '') ? 'selected' : ''}>${c ? esc(c) : '(keine)'}</option>`).join('')
     + '<option value="__new">+ Neue Kategorie …</option>';
   const tagChips = TAGS.map(t => `<span class="tag-chip ${edit.tags.includes(t) ? 'selected' : ''}" data-action="edit-toggle-tag" data-tag="${esc(t)}">${esc(t)}</span>`).join('');
@@ -206,6 +208,15 @@ export function editorHtml(edit, categories){
         <div>${tagChips}</div>
         <label class="lbl">Quelle (Link, optional)</label>
         <input type="text" value="${esc(edit.sourceUrl ?? '')}" data-f="sourceUrl" placeholder="https://…">
+        <label class="lbl">Titelbild</label>
+        <div class="img-edit">
+          <div class="mini">${imgPreview ? `<img src="${esc(imgPreview)}" alt="">` : categoryEmoji(edit.category)}</div>
+          <div class="btns">
+            <button class="btn small secondary" data-action="edit-img-pick">${imgPreview ? 'Bild ändern' : 'Bild wählen'}</button>
+            ${imgPreview ? '<button class="btn small secondary" data-action="edit-img-clear">Entfernen</button>' : ''}
+          </div>
+          <input type="file" id="edit-img-file" accept="image/*" style="display:none;">
+        </div>
       </div>
       <div class="card form">
         <h2>Zutaten</h2>

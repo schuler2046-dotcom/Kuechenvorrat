@@ -120,3 +120,26 @@ export async function mutate(key, fallback, mutator){
   changeCb && changeCb(key, upd, { fromCache: false });
   return upd;
 }
+
+// Einzelnes Dokument unter data/{key} lesen bzw. schreiben, ohne Echtzeit-Abo.
+// Gedacht für große, selten gelesene Daten wie Rezeptbilder (key "img-<rezeptId>").
+// Offline liefert Firestore den lokal zwischengespeicherten Stand.
+export async function readKey(key, fallback = null){
+  if(mode === 'firebase'){
+    try{
+      const snap = await F.getDoc(docRef(key));
+      const d = snap.data();
+      if(d && typeof d.json === 'string') return JSON.parse(d.json);
+    }catch(e){ /* nicht lesbar -> fallback */ }
+    return fallback;
+  }
+  return readLocal(key, fallback);
+}
+
+export async function writeKey(key, value){
+  if(mode === 'firebase'){
+    await F.setDoc(docRef(key), { json: JSON.stringify(value), updatedAt: F.serverTimestamp() });
+    return;
+  }
+  localStorage.setItem(LOCAL_PREFIX + key, JSON.stringify(value));
+}
