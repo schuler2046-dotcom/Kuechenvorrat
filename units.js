@@ -215,6 +215,11 @@ export function formatBase(dim, value){
   if(dim === 'mass') return formatMass(value);
   if(dim === 'volume') return formatVolume(value);
   if(dim === 'count') return fmtFrac(value) + ' stk';
+  if(String(dim).startsWith('item:')){
+    const label = String(dim).slice(5);
+    const [one, many] = ITEM_LABELS[label] || [label, label];
+    return fmtFrac(value) + ' ' + (value > 1.04 ? many : one);
+  }
   return fmtNum(value);
 }
 
@@ -233,6 +238,32 @@ export function formatQuantity(amount, unit){
   if(info.dim === 'count') return fmtFrac(n) + (String(unit ?? '').trim() ? ' stk' : '');
   const [one, many] = ITEM_LABELS[info.label] || [info.label, info.label];
   return fmtFrac(n) + ' ' + (n > 1.04 ? many : one);
+}
+
+// Basiswert einer Dimension als Menge + passende Einheit (für Einkaufslisten).
+export function partsFromBase(dim, value){
+  if(dim === 'mass'){
+    if(value < 1) return { amount: roundTo(value * 1000, 0), unit: 'mg' };
+    if(value >= 1000) return { amount: roundTo(value / 1000, 2), unit: 'kg' };
+    return { amount: roundTo(value, value < 10 ? 1 : 0), unit: 'g' };
+  }
+  if(dim === 'volume'){
+    if(value >= 1000) return { amount: roundTo(value / 1000, 2), unit: 'l' };
+    return { amount: roundTo(value, value < 10 ? 1 : 0), unit: 'ml' };
+  }
+  if(dim === 'count') return { amount: roundTo(value, 2), unit: 'stk' };
+  if(String(dim).startsWith('item:')) return { amount: roundTo(value, 2), unit: String(dim).slice(5) };
+  return { amount: roundTo(value, 2), unit: '' };
+}
+
+// Menge + beliebige Einheit metrisch ausdrücken (2 EL -> 30 ml). Unbekanntes bleibt unverändert.
+export function metricParts(amount, unit){
+  const n = parseAmount(amount);
+  if(n === null) return { amount: String(amount ?? '').trim(), unit: canonicalUnit(unit) };
+  const info = unitInfo(unit);
+  if(!info) return { amount: n, unit: String(unit ?? '').trim() };
+  if(info.dim === 'count') return { amount: roundTo(n, 2), unit: String(unit ?? '').trim() === '' ? '' : 'stk' };
+  return partsFromBase(info.dim, n * info.factor);
 }
 
 // ---------- Packungsgrößen ----------

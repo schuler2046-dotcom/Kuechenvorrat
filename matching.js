@@ -74,14 +74,27 @@ function coreTokens(name){
 }
 
 // Stabiler Schlüssel eines Namens, z. B. für gespeicherte Aliase.
+const keyCache = new Map();
 export function normKey(name){
-  const toks = [...coreTokens(name)].sort();
-  return toks.join(' ');
+  const raw = String(name ?? '');
+  let v = keyCache.get(raw);
+  if(v === undefined){
+    v = [...coreTokens(raw)].sort().join(' ');
+    keyCache.set(raw, v);
+  }
+  return v;
 }
 
 // Klein, ohne Umlaute, ohne Klammern – Grundlage für die Familien-Muster.
+const foldCache = new Map();
 function cleanFold(name){
-  return fold(String(name ?? '').replace(/\([^)]*\)/g, ' ').replace(/,/g, ' ')).replace(/\s+/g, ' ').trim();
+  const raw = String(name ?? '');
+  let v = foldCache.get(raw);
+  if(v === undefined){
+    v = fold(raw.replace(/\([^)]*\)/g, ' ').replace(/,/g, ' ')).replace(/\s+/g, ' ').trim();
+    foldCache.set(raw, v);
+  }
+  return v;
 }
 
 // ---------- Zutaten-Familien ----------

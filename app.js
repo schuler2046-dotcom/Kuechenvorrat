@@ -8,9 +8,11 @@ import { uid, escapeHtml } from './util.js';
 import { parseIngredientLine, normalizeIngredient } from './parse.js';
 import { buildAiPrompt, buildPhotoPrompt, parseAiRecipes, parsePhotoItems } from './ai.js';
 import { spokenToLines } from './voice.js';
+import { evaluateIngredient, evaluateRecipe, normKey, DEFAULT_STAPLES } from './matching.js';
+import { recipeCardHtml, recipeDetailHtml, editorHtml } from './recipes-ui.js';
 import {
   parseAmount, canonicalUnit, isItemUnit, stepFor, formatQuantity, addAmounts,
-  suggestPackSize, UNIT_OPTIONS
+  suggestPackSize, metricParts, partsFromBase, UNIT_OPTIONS
 } from './units.js';
 
 const HOUSEHOLD_LS_KEY = 'vorrat-household';
@@ -31,9 +33,12 @@ let online = navigator.onLine;
 let pendingRender = false;
 let collapsedCats = new Set();
 
-let draftName = '', draftNotes = '';
-let draftTags = [];
-let draftIngredients = [];
+let recipeSearch = '', recipeCatFilter = 'alle', recipeShown = 24;
+let viewRecipeId = null, viewPortions = 2, portionsFor = null, aliasFor = null;
+let cookPortions = 2;
+let editing = null;
+let settingsOpen = false;
+let aiDetailsOpen = false;
 let aiPasteOpen = false;
 let aiSuggestions = null;
 let aiError = '';
@@ -97,10 +102,12 @@ function onStoreChange(key, value){
   if(key === 'shopping' && value !== null) shopping = value;
   if(key === 'meta' && value !== null) meta = value;
   receivedKeys.add(key);
+  lastSync = new Date();
   if(!ready && DATA_KEYS.every(k => receivedKeys.has(k))){
     ready = true;
+    routeFromHash();
+    return;
   }
-  lastSync = new Date();
   scheduleRender();
 }
 
@@ -112,17 +119,35 @@ function onStoreStatus(msg){
 
 // ---------- Fachlogik ----------
 
-function ingredientAvailable(ingName){
-  const q = ingName.trim().toLowerCase();
-  if(!q) return false;
-  return inventory.some(item => {
-    const n = item.name.trim().toLowerCase();
-    return n.includes(q) || q.includes(n);
-  });
+// Abgleich-Kontext: Grundvorrat und gelernte Aliase aus den Einstellungen (meta).
+function matchCtx(){
+  return {
+    staples: (meta && Array.isArray(meta.staples)) ? meta.staples : DEFAULT_STAPLES,
+    aliases: (meta && meta.aliases) || {}
+  };
+}
+
+// Bewertung der Zutaten eines Rezepts gegen den Vorrat. Der Cache gilt nur für einen
+// Render-Durchlauf (render() leert ihn), damit er nie veraltete Daten zeigt.
+const evalCache = new Map();
+function evalRecipe(r, factor = 1){
+  const key = r.id + '|' + factor;
+  let ev = evalCache.get(key);
+  if(!ev){ ev = evaluateRecipe(r, inventory, matchCtx(), factor); evalCache.set(key, ev); }
+  return ev;
+}
+
+function ingredientAvailable(name){
+  return evaluateIngredient({ name }, inventory, matchCtx()).status !== 'fehlt';
 }
 
 function missingIngredients(recipe){
-  return recipe.ingredients.filter(ing => !ingredientAvailable(ing.name));
+  return evalRecipe(recipe).missing.map(row => row.ing);
+}
+
+function recipeCategories(){
+  const list = meta && Array.isArray(meta.recipeCategories) && meta.recipeCategories.length ? meta.recipeCategories : null;
+  return list || ['süß', 'deftig'];
 }
 
 // Liefert die Zubereitungsschritte eines Rezepts. Neue KI-Rezepte haben ein "steps"-Feld;
@@ -138,14 +163,48 @@ function recipeSteps(r){
     .map(s => /[.!?]$/.test(s) ? s : s + '.');
 }
 
-function availabilityBadge(recipe){
-  const total = recipe.ingredients.length;
-  if(total === 0) return {cls:'partial', text:'keine Zutaten hinterlegt'};
-  const missing = missingIngredients(recipe).length;
-  const have = total - missing;
-  if(missing === 0) return {cls:'full', text: 'alles da'};
-  if(have === 0) return {cls:'none', text: have + ' von ' + total + ' vorrätig'};
-  return {cls:'partial', text: have + ' von ' + total + ' vorrätig'};
+// Titelbild eines Rezepts (Data-URL) oder null, solange es nicht geladen ist.
+const imageCache = new Map();
+function getImage(r){
+  return imageCache.get(r.id) || null;
+}
+
+// ---------- Navigation (Hash-Routen, damit die Zurück-Taste funktioniert) ----------
+
+function go(hash){
+  if(location.hash === hash || (hash === '' && !location.hash)) routeFromHash();
+  else location.hash = hash;
+}
+
+function goBack(){
+  if(history.length > 1) history.back();
+  else go('');
+}
+
+function routeFromHash(){
+  const parts = location.hash.replace(/^#\/?/, '').split('/').map(decodeURIComponent);
+  const [a, id, sub] = parts;
+  viewRecipeId = null; cookingRecipeId = null; editing = null; settingsOpen = false; aliasFor = null;
+  if(a === 'rezept' && id){
+    viewRecipeId = id;
+    const r = recipes.find(x => x.id === id);
+    if(portionsFor !== id){ viewPortions = (r && r.servings) || 2; portionsFor = id; }
+    if(sub === 'kochen'){
+      cookingRecipeId = id;
+      cookPortions = viewPortions;
+      cookChecked = new Set();
+      cookStepsDone = new Set();
+    } else if(sub === 'bearbeiten'){
+      beginEdit(id);
+    }
+  } else if(a === 'neu'){
+    beginEdit(null);
+  } else if(a === 'einstellungen'){
+    settingsOpen = true;
+  }
+  if(cookingRecipeId) requestWakeLock(); else releaseWakeLock();
+  window.scrollTo(0, 0);
+  if(ready) render();
 }
 
 
@@ -186,9 +245,13 @@ function openShoppingCount(){
 // ---------- Kochmodus ----------
 
 // Bildschirm während des Kochens anlassen; wird nicht überall unterstützt (dann still ignorieren).
+// Der Browser gibt die Sperre beim App-Wechsel frei, deshalb wird sie bei Rückkehr neu angefordert.
 async function requestWakeLock(){
   try{
-    if(navigator.wakeLock && !wakeLock) wakeLock = await navigator.wakeLock.request('screen');
+    if(navigator.wakeLock && !wakeLock){
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => { wakeLock = null; });
+    }
   }catch(e){ /* nicht unterstützt oder abgelehnt – Kochmodus funktioniert trotzdem */ }
 }
 
@@ -199,36 +262,23 @@ async function releaseWakeLock(){
   wakeLock = null;
 }
 
-function openCookMode(id){
-  cookingRecipeId = id;
-  cookChecked = new Set();
-  cookStepsDone = new Set();
-  requestWakeLock();
-  window.scrollTo(0, 0);
-  render();
-}
-
-function closeCookMode(){
-  cookingRecipeId = null;
-  releaseWakeLock();
-  render();
-}
-
 function renderCookMode(){
   const r = recipes.find(x => x.id === cookingRecipeId);
   if(!r){ cookingRecipeId = null; return ''; }
+  const factor = cookPortions / (r.servings || 2);
+  const ev = evalRecipe(r, factor);
   const effort = r.aufwand ? `<span class="effort-badge">${r.aufwand==='aufwändig'?'aufwändig':'schnell'}${r.zeit?' · '+escapeHtml(r.zeit):''}</span>` : '';
 
-  const ingHtml = r.ingredients.length
-    ? r.ingredients.map((i, idx) => {
+  const ingHtml = ev.rows.length
+    ? ev.rows.map((row, idx) => {
         const done = cookChecked.has(idx);
-        const miss = !ingredientAvailable(i.name);
-        const qty = i.amount ? escapeHtml(String(i.amount)) + (i.unit ? ' ' + escapeHtml(i.unit) : '') : '';
+        const n = parseAmount(row.ing.amount);
+        const qtyText = n === null ? String(row.ing.amount ?? '').trim() : formatQuantity(n * factor, row.ing.unit);
         return `
           <li class="cook-ing ${done?'done':''}" data-action="toggle-cook-ing" data-idx="${idx}">
             <span class="cook-check">${done ? '✓' : ''}</span>
-            <span class="cook-ing-text">${escapeHtml(i.name)}${qty ? ' <span class="cook-qty">'+qty+'</span>' : ''}</span>
-            ${miss ? '<span class="cook-miss">fehlt</span>' : ''}
+            <span class="cook-ing-text">${escapeHtml(row.ing.name)}${qtyText ? ' <span class="cook-qty">'+escapeHtml(qtyText)+'</span>' : ''}</span>
+            ${row.status === 'fehlt' ? '<span class="cook-miss">fehlt</span>' : ''}
           </li>`;
       }).join('')
     : '<li class="empty-note">Keine Zutaten hinterlegt.</li>';
@@ -251,6 +301,11 @@ function renderCookMode(){
         <button class="btn small secondary" data-action="close-cook">← Zurück</button>
         <h1 class="cook-title">${escapeHtml(r.name)}${effort}</h1>
       </div>
+      <div class="cook-portions">
+        <button class="step-btn" data-action="cook-portions-dec" aria-label="Weniger Portionen">−</button>
+        <span class="portions-n">${cookPortions} ${cookPortions === 1 ? 'Portion' : 'Portionen'}</span>
+        <button class="step-btn" data-action="cook-portions-inc" aria-label="Mehr Portionen">+</button>
+      </div>
       <div class="cook-card">
         <h2>Zutaten</h2>
         <div class="cook-hint">Zum Abhaken antippen.</div>
@@ -268,6 +323,134 @@ function renderCookMode(){
   `;
 }
 
+// ---------- Rezept-Detail, Editor, Einstellungen ----------
+
+function renderRecipeDetail(){
+  const r = recipes.find(x => x.id === viewRecipeId);
+  if(!r){ viewRecipeId = null; return ''; }
+  const ev = evalRecipe(r, viewPortions / (r.servings || 2));
+  const names = [...new Set(inventory.map(i => String(i.name).trim()))].sort((a, b) => a.localeCompare(b, 'de'));
+  return recipeDetailHtml({ r, ev, portions: viewPortions, img: getImage(r), aliasFor, inventoryNames: names });
+}
+
+function beginEdit(id){
+  const r = id ? recipes.find(x => x.id === id) : null;
+  if(id && !r){ editing = null; return; }
+  editing = {
+    isNew: !r,
+    base: r || null,
+    name: r ? r.name : '',
+    category: r ? (r.category || '') : '',
+    servings: r && r.servings ? String(r.servings) : '',
+    zeit: r ? (r.zeit || '') : '',
+    sourceUrl: r ? (r.sourceUrl || '') : '',
+    tags: r ? [...(r.tags || [])] : [],
+    ingredients: r ? (r.ingredients || []).map(i => ({
+      name: i.name || '', amount: String(i.amount ?? ''), unit: i.unit || '', note: i.note || '', approx: !!i.approx
+    })) : [],
+    steps: r ? recipeSteps(r) : []
+  };
+}
+
+async function saveEdit(){
+  const e = editing;
+  if(!e) return;
+  const name = e.name.trim();
+  if(!name){ statusMsg = 'Bitte einen Namen für das Rezept eintragen.'; render(); return; }
+  // Jede Zutat normalisieren: auch eine in den Namen getippte Menge ("200g Mehl") wird getrennt.
+  const ingredients = e.ingredients.map(i => {
+    const clean = { name: String(i.name || '').trim(), amount: String(i.amount || '').trim(), unit: canonicalUnit(i.unit || '') };
+    const norm = normalizeIngredient(clean);
+    const out = { ...norm };
+    if(i.note && i.note.trim()) out.note = i.note.trim();
+    if(i.approx) out.approx = true;
+    return out;
+  }).filter(i => i.name);
+  const steps = e.steps.map(s => String(s || '').trim()).filter(Boolean);
+  const servingsNum = parseAmount(e.servings);
+  const base = e.base || {};
+  const rec = {
+    ...base,
+    id: base.id || uid(),
+    name,
+    tags: e.tags,
+    ingredients,
+    steps,
+    category: e.category || undefined,
+    servings: servingsNum && servingsNum > 0 ? Math.round(servingsNum) : undefined,
+    zeit: e.zeit.trim() || undefined,
+    sourceUrl: e.sourceUrl.trim() || undefined,
+    source: base.source || 'manuell',
+    status: 'ok'
+  };
+  // Waren die Schritte bisher im Notizfeld, würden sie sonst doppelt erscheinen.
+  if(!(base.steps && base.steps.length) && steps.length) rec.notes = '';
+  recipes = await mutateShared('recipes', recipes, (list) => {
+    const i = list.findIndex(x => x.id === rec.id);
+    if(i >= 0) list[i] = rec; else list.push(rec);
+    return list;
+  });
+  editing = null;
+  statusMsg = '„' + name + '" gespeichert.';
+  location.replace('#/rezept/' + encodeURIComponent(rec.id));
+}
+
+function renderEditor(){
+  return editorHtml(editing, recipeCategories());
+}
+
+function renderSettings(){
+  const staples = (meta && Array.isArray(meta.staples)) ? meta.staples : DEFAULT_STAPLES;
+  const cats = recipeCategories();
+  const aliases = (meta && meta.aliases) || {};
+  const aliasNames = (meta && meta.aliasNames) || {};
+  const aliasRows = Object.keys(aliases).map(k => `
+    <li><span class="shop-name">${escapeHtml(aliasNames[k] || k)} → ${escapeHtml(aliases[k])}</span>
+      <span class="item-actions"><button data-action="del-alias" data-key="${escapeHtml(k)}" title="Zuordnung entfernen">×</button></span></li>`).join('');
+  const kb = Math.round(new Blob([JSON.stringify(recipes)]).size / 1024);
+  const full = kb >= 700;
+  return `
+    <div class="settings">
+      <div class="detail-bar">
+        <button class="btn small secondary" data-action="go-back">← Zurück</button>
+      </div>
+      <h1 class="detail-title">Einstellungen</h1>
+      <div class="card">
+        <h2>Grundvorrat</h2>
+        <div class="status-line">Immer vorhanden, werden bei Rezepten nie als „fehlt" gezählt und nie abgebucht (kommagetrennt).</div>
+        <div class="add-row">
+          <input type="text" id="staples-input" value="${escapeHtml(staples.join(', '))}">
+          <button class="btn small" data-action="save-staples">Speichern</button>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Rezept-Kategorien</h2>
+        <div class="status-line">Für den Filter in der Rezeptliste. Bestehende Rezepte behalten ihre Kategorie.</div>
+        <div>${cats.map(c => `<span class="tag-chip selected">${escapeHtml(c)} <span data-action="del-recipe-category" data-cat="${escapeHtml(c)}" title="Entfernen">×</span></span>`).join('')}</div>
+        <div class="add-row">
+          <input type="text" id="new-category-input" placeholder="Neue Kategorie, z. B. Frühstück">
+          <button class="btn small" data-action="add-recipe-category">Hinzufügen</button>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Gelernte Zuordnungen</h2>
+        <div class="status-line">Hast du bei einer fehlenden Zutat „Hab ich anders" gewählt, steht es hier.</div>
+        ${aliasRows ? `<ul class="shopping-list">${aliasRows}</ul>` : '<div class="empty-note">Noch keine Zuordnungen.</div>'}
+      </div>
+      <div class="card">
+        <h2>Daten</h2>
+        <div class="status-line">Rezepte belegen ${kb} KB von rund 1000 KB in der Datenbank${full ? ' – bald voll, bitte melden.' : '.'}</div>
+        <div class="recipe-controls">
+          <button class="btn small secondary" data-action="export-json">Daten sichern (Export)</button>
+          <button class="btn small secondary" data-action="import-json">Sicherung einspielen (Import)</button>
+          ${firebaseConfigured() ? '<button class="btn small secondary" data-action="change-household">Haushalts-Code ändern</button>' : ''}
+        </div>
+        <input type="file" id="import-file" accept="application/json,.json" style="display:none;">
+        <div class="footer-note-dark">Alle Daten liegen ${storeMode()==='firebase' ? 'sicher in eurer gemeinsamen Cloud-Datenbank' : 'derzeit nur lokal auf diesem Gerät'}. App-Updates verändern gespeicherte Daten nie.</div>
+      </div>
+    </div>`;
+}
+
 // ---------- Rendering ----------
 
 function scheduleRender(){
@@ -277,17 +460,26 @@ function scheduleRender(){
 
 function render(){
   pendingRender = false;
+  evalCache.clear();
   const app = document.getElementById('app');
   if(firebaseConfigured() && !householdCode){ app.innerHTML = renderHouseholdScreen(); return; }
   if(!ready){ app.innerHTML = '<div class="loading">Vorratsregal wird geladen ...</div>'; return; }
+  if(editing){ app.innerHTML = renderEditor(); return; }
   if(cookingRecipeId){
     const cook = renderCookMode();
     if(cook){ app.innerHTML = cook; return; }
   }
+  if(viewRecipeId){
+    const detail = renderRecipeDetail();
+    if(detail){ app.innerHTML = detail; return; }
+  }
+  if(settingsOpen){ app.innerHTML = renderSettings(); return; }
   const openCount = openShoppingCount();
   const modeNote = storeMode() === 'firebase'
     ? 'Gemeinsame Liste – Änderungen erscheinen sofort auf allen Geräten.'
     : 'Lokaler Modus: Daten nur auf diesem Gerät (Firebase noch nicht eingerichtet).';
+  const panels = { vorrat: renderVorrat, rezepte: renderRezepte, wochenplan: renderWochenplan, einkauf: renderEinkauf };
+  const tab = (key, label, extra = '') => `<button data-action="switch-tab" data-tab="${key}" class="${activeTab===key?'active':''}">${label}${extra}</button>`;
   app.innerHTML = `
     <div class="app-header">
       <div>
@@ -296,20 +488,17 @@ function render(){
       </div>
       <div class="sync-row">
         <span class="sync-time"><span class="sync-dot ${online ? '' : 'offline'}"></span>${online ? 'Stand: ' + fmtTime(lastSync) : 'Offline – Änderungen werden nachgereicht'}</span>
+        <button class="icon-btn" data-action="open-settings" aria-label="Einstellungen" title="Einstellungen">⚙</button>
       </div>
     </div>
     <div class="status-banner">${statusMsg ? escapeHtml(statusMsg) : ''}</div>
-    <nav class="tabs">
-      <button data-action="switch-tab" data-tab="vorrat" class="${activeTab==='vorrat'?'active':''}">Vorrat</button>
-      <button data-action="switch-tab" data-tab="rezepte" class="${activeTab==='rezepte'?'active':''}">Rezepte</button>
-      <button data-action="switch-tab" data-tab="wochenplan" class="${activeTab==='wochenplan'?'active':''}">Wochenplan</button>
-      <button data-action="switch-tab" data-tab="einkauf" class="${activeTab==='einkauf'?'active':''}">Einkauf${openCount ? '<span class="tab-count">'+openCount+'</span>' : ''}</button>
+    <div class="panel active">${(panels[activeTab] || renderVorrat)()}</div>
+    <nav class="tabs bottom">
+      ${tab('vorrat', 'Vorrat')}
+      ${tab('rezepte', 'Rezepte')}
+      ${tab('wochenplan', 'Plan')}
+      ${tab('einkauf', 'Einkauf', openCount ? '<span class="tab-count">'+openCount+'</span>' : '')}
     </nav>
-    <div class="panel ${activeTab==='vorrat'?'active':''}">${renderVorrat()}</div>
-    <div class="panel ${activeTab==='rezepte'?'active':''}">${renderRezepte()}</div>
-    <div class="panel ${activeTab==='wochenplan'?'active':''}">${renderWochenplan()}</div>
-    <div class="panel ${activeTab==='einkauf'?'active':''}">${renderEinkauf()}</div>
-    ${renderFooterTools()}
   `;
 }
 
@@ -567,39 +756,64 @@ function renderPhotoBox(){
   `;
 }
 
+function filteredRecipes(){
+  const q = recipeSearch.trim().toLowerCase();
+  let list = recipes.filter(r => !r.hidden);
+  if(q) list = list.filter(r => (r.name + ' ' + (r.ingredients || []).map(i => i.name).join(' ')).toLowerCase().includes(q));
+  if(recipeCatFilter !== 'alle' && recipeCatFilter !== 'kochbar') list = list.filter(r => r.category === recipeCatFilter);
+  if(recipeFilterTags.length) list = list.filter(r => recipeFilterTags.every(t => (r.tags || []).includes(t)));
+  let rows = list.map(r => ({ r, ev: evalRecipe(r) }));
+  if(recipeCatFilter === 'kochbar') rows = rows.filter(x => x.ev.ok && x.ev.total > 0);
+  rows.sort((a, b) =>
+    (a.ev.missing.length + a.ev.short.length) - (b.ev.missing.length + b.ev.short.length)
+    || a.r.name.localeCompare(b.r.name, 'de'));
+  return rows;
+}
+
+function renderRecipeGrid(){
+  const all = filteredRecipes();
+  if(!all.length) return '<div class="empty-note">Keine Rezepte für diese Auswahl.</div>';
+  const shown = all.slice(0, recipeShown);
+  const more = all.length > shown.length
+    ? `<div class="more-row"><button class="btn small secondary" data-action="recipes-more">Mehr anzeigen (${all.length - shown.length})</button></div>`
+    : '';
+  return `<div class="rgrid">${shown.map(x => recipeCardHtml(x.r, x.ev, getImage(x.r))).join('')}</div>${more}`;
+}
+
+function recipeCountText(){
+  const n = filteredRecipes().length;
+  return n + (n === 1 ? ' Rezept' : ' Rezepte') + ' – sortiert danach, wofür am meisten schon da ist.';
+}
+
+// Aktualisiert nur Liste und Zähler, damit das Suchfeld beim Tippen den Fokus behält.
+function refreshRecipeList(){
+  const grid = document.getElementById('recipe-grid');
+  if(grid) grid.innerHTML = renderRecipeGrid();
+  const info = document.getElementById('recipe-count');
+  if(info) info.textContent = recipeCountText();
+}
+
 function renderRezepte(){
-  const chips = TAGS.map(t => `
+  const chip = (key, label) => `<span class="tag-chip ${recipeCatFilter === key ? 'selected' : ''}" data-action="set-cat-filter" data-cat="${escapeHtml(key)}">${escapeHtml(label)}</span>`;
+  const tagChips = TAGS.map(t => `
     <span class="tag-chip ${recipeFilterTags.includes(t)?'selected':''}" data-action="toggle-filter-tag" data-tag="${t}">${t}</span>
   `).join('');
-
-  let list = recipes;
-  if(recipeFilterTags.length){
-    list = list.filter(r => recipeFilterTags.every(t => r.tags.includes(t)));
-  }
-  list = [...list].sort((a,b) => missingIngredients(a).length - missingIngredients(b).length);
-
-  const cards = list.length ? list.map(r => renderRecipeCard(r)).join('') : '<div class="empty-note">Keine Rezepte für diese Auswahl.</div>';
-
+  const aiOpen = aiDetailsOpen || aiPasteOpen || aiSuggestions || aiError;
   return `
     <div class="card">
-      <h2>Rezeptideen</h2>
-      <div>${chips}</div>
-      <div class="status-line">Sortiert danach, wofür am meisten schon da ist.</div>
-      ${cards}
-    </div>
-    <div class="card">
-      <h3>KI-Vorschläge über die Claude-App</h3>
-      ${renderAiBox()}
-    </div>
-    <div class="card">
-      <h3>Neues Rezept anlegen</h3>
-      <div class="paste-box">
-        <div class="paste-hint">Eine Zutat pro Zeile – die Menge darf vorne oder hinten stehen (z. B. „200 g Linsen", „Linsen 200 g" oder einfach „Zwiebel"). Den Gerichtsnamen oben eintragen; ist das Feld leer, wird die erste Zeile als Name genommen. Danach unten Tags wählen und speichern.</div>
-        <textarea id="paste-area" rows="4" placeholder="Linsensuppe&#10;200 g rote Linsen&#10;2 Karotten&#10;1 Zwiebel"></textarea>
-        <div style="margin-top:8px;"><button class="btn small secondary" data-action="parse-paste">In Formular übernehmen</button></div>
+      <div class="head-row"><h2>Rezepte</h2><button class="btn small" data-action="new-recipe">+ Neu</button></div>
+      <div class="search-row">
+        <input type="search" id="recipe-search" placeholder="🔍 Rezept oder Zutat suchen" value="${escapeHtml(recipeSearch)}" autocomplete="off">
       </div>
-      ${renderNewRecipeForm()}
+      <div class="chip-row">${chip('alle', 'Alle')}${chip('kochbar', 'Kochbar jetzt')}${recipeCategories().map(c => chip(c, c)).join('')}</div>
+      <details class="more-filters" ${recipeFilterTags.length ? 'open' : ''}><summary>Weitere Filter</summary><div>${tagChips}</div></details>
+      <div class="status-line" id="recipe-count">${escapeHtml(recipeCountText())}</div>
+      <div id="recipe-grid">${renderRecipeGrid()}</div>
     </div>
+    <details class="card ai-details" ${aiOpen ? 'open' : ''}>
+      <summary>KI-Vorschläge über die Claude-App</summary>
+      ${renderAiBox()}
+    </details>
   `;
 }
 
@@ -658,60 +872,6 @@ function renderAiBox(){
       ` : ''}
       ${aiError ? `<div class="ai-error">${escapeHtml(aiError)}</div>` : ''}
       ${suggestionsHtml}
-    </div>
-  `;
-}
-
-function renderRecipeCard(r){
-  const badge = availabilityBadge(r);
-  const missing = missingIngredients(r).map(i=>i.name);
-  const ingItems = r.ingredients.map(i => {
-    const miss = missing.includes(i.name);
-    return `<li class="${miss?'miss':'have'}">${escapeHtml(i.name)}${i.amount?` (${escapeHtml(String(i.amount))}${i.unit?' '+escapeHtml(i.unit):''})`:''}</li>`;
-  }).join('');
-  const tagsHtml = r.tags.map(t => `<span class="recipe-tag">${escapeHtml(t)}</span>`).join('');
-  const effort = r.aufwand ? `<span class="effort-badge">${r.aufwand==='aufwändig'?'aufwändig':'schnell'}${r.zeit?' · '+escapeHtml(r.zeit):''}</span>` : '';
-
-  return `
-    <div class="recipe-card" data-recipe-id="${r.id}">
-      <div class="recipe-top">
-        <p class="recipe-title">${escapeHtml(r.name)}${effort}</p>
-        <span class="avail-badge ${badge.cls}">${badge.text}</span>
-      </div>
-      <div class="recipe-tags">${tagsHtml}</div>
-      <ul class="ing-list">${ingItems}</ul>
-      ${r.notes ? `<div class="recipe-notes">${escapeHtml(r.notes)}</div>` : ''}
-      <div class="recipe-controls">
-        <button class="btn small" data-action="cook-recipe" data-id="${r.id}">👨‍🍳 Kochen</button>
-        <button class="btn small secondary" data-action="plan-recipe" data-id="${r.id}">Für Wochenplan vormerken</button>
-        <button class="btn small secondary" data-action="del-recipe" data-id="${r.id}">Löschen</button>
-      </div>
-    </div>
-  `;
-}
-
-function renderNewRecipeForm(){
-  const chips = TAGS.map(t => `
-    <span class="tag-chip ${draftTags.includes(t) ? 'selected':''}" data-action="toggle-draft-tag" data-tag="${t}">${t}</span>
-  `).join('');
-
-  const ingRows = draftIngredients.map((ing, idx) => `
-    <div class="ing-form-row">
-      <input type="text" value="${escapeHtml(ing.name)}" placeholder="Zutat" data-action="draft-ing-name" data-idx="${idx}">
-      <input type="text" class="qty-input" value="${escapeHtml(ing.amount||'')}" placeholder="Menge" data-action="draft-ing-amount" data-idx="${idx}">
-      <input type="text" class="unit-input" value="${escapeHtml(ing.unit||'')}" placeholder="Einheit" data-action="draft-ing-unit" data-idx="${idx}">
-      <button class="btn small secondary" data-action="remove-draft-ing" data-idx="${idx}">×</button>
-    </div>
-  `).join('');
-
-  return `
-    <div class="new-recipe-form">
-      <input type="text" id="new-recipe-name" placeholder="Name des Gerichts" value="${escapeHtml(draftName)}">
-      <div>${chips}</div>
-      <div id="draft-ing-rows">${ingRows}</div>
-      <div><button class="btn small secondary" data-action="add-draft-ing">+ Zutat</button></div>
-      <textarea id="new-recipe-notes" placeholder="Zubereitung – ein Schritt pro Zeile (erscheint so im Kochmodus)" rows="3">${escapeHtml(draftNotes)}</textarea>
-      <div><button class="btn" data-action="save-recipe">Rezept speichern</button></div>
     </div>
   `;
 }
@@ -783,8 +943,8 @@ function renderEinkauf(){
   const row = (s) => `
     <li class="${s.checked?'checked':''}">
       <input type="checkbox" data-action="toggle-shop" data-id="${s.id}" ${s.checked?'checked':''}>
-      <span class="shop-name">${escapeHtml(s.name)}${s.amount ? ' – ' + escapeHtml(String(s.amount)) + (s.unit ? ' ' + escapeHtml(s.unit) : '') : ''}</span>
-      ${s.source === 'plan' ? '<span class="shop-src">Wochenplan</span>' : ''}
+      <span class="shop-name">${escapeHtml(s.name)}${s.amount ? ' – ' + escapeHtml(formatQuantity(s.amount, s.unit)) : ''}</span>
+      ${s.source === 'plan' ? '<span class="shop-src">Wochenplan</span>' : s.source === 'rezept' ? '<span class="shop-src">Rezept</span>' : ''}
       <span class="item-actions"><button data-action="del-shop" data-id="${s.id}" title="entfernen">×</button></span>
     </li>
   `;
@@ -808,18 +968,6 @@ function renderEinkauf(){
         <button class="btn small secondary" data-action="clear-done-shop" ${done.length===0?'disabled':''}>Abgehakte entfernen</button>
       </div>
       <div class="status-line" style="margin-top:8px;">„In den Vorrat übernehmen" legt die Artikel im Vorratsschrank unter „Sonstiges" ab – Lagerort und Kategorie lassen sich dort anpassen.</div>
-    </div>
-  `;
-}
-
-function renderFooterTools(){
-  return `
-    <div class="footer-tools">
-      <button class="btn small secondary" data-action="export-json">Daten sichern (Export)</button>
-      <button class="btn small secondary" data-action="import-json">Sicherung einspielen (Import)</button>
-      ${firebaseConfigured() ? '<button class="btn small secondary" data-action="change-household">Haushalts-Code ändern</button>' : ''}
-      <input type="file" id="import-file" accept="application/json,.json" style="display:none;">
-      <span class="footer-note">Alle Daten liegen ${storeMode()==='firebase' ? 'sicher in eurer gemeinsamen Cloud-Datenbank' : 'derzeit nur lokal auf diesem Gerät'}. App-Updates verändern gespeicherte Vorräte nie.</span>
     </div>
   `;
 }
@@ -913,18 +1061,62 @@ async function deleteItemEdit(id){
   render();
 }
 
-async function saveRecipe(){
-  const nameEl = document.getElementById('new-recipe-name');
-  const name = nameEl.value.trim();
-  if(!name){ nameEl.focus(); return; }
-  // Beim Speichern jede Zutat normalisieren – so wird auch eine manuell ins Namensfeld
-  // getippte Menge ("200g Mehl") noch in Name/Menge/Einheit getrennt.
-  const ingredients = draftIngredients.map(normalizeIngredient).filter(i => i.name.trim());
-  const notes = document.getElementById('new-recipe-notes').value.trim();
-  const newRecipe = { id: uid(), name, tags: [...draftTags], ingredients, notes };
-  recipes = await mutateShared('recipes', recipes, (list) => { list.push(newRecipe); return list; });
-  draftIngredients = []; draftTags = []; draftName = ''; draftNotes = '';
+function catsOf(m){
+  return m && Array.isArray(m.recipeCategories) && m.recipeCategories.length ? m.recipeCategories : ['süß', 'deftig'];
+}
+
+async function addRecipeCategory(name){
+  meta = await mutateShared('meta', meta, (m) => {
+    m = m || {};
+    const cur = catsOf(m);
+    if(!cur.includes(name)) m.recipeCategories = [...cur, name];
+    return m;
+  });
+}
+
+// "Hab ich unter anderem Namen": verknüpft die Rezeptzutat dauerhaft mit einem Vorratsartikel.
+async function saveAlias(idx, target){
+  const r = recipes.find(x => x.id === viewRecipeId);
+  const ing = r && r.ingredients[idx];
+  if(!ing) return;
+  const key = normKey(ing.name);
+  meta = await mutateShared('meta', meta, (m) => {
+    m = m || {};
+    m.aliases = { ...(m.aliases || {}), [key]: target };
+    m.aliasNames = { ...(m.aliasNames || {}), [key]: ing.name };
+    return m;
+  });
+  aliasFor = null;
+  statusMsg = '„' + ing.name + '" ist jetzt mit „' + target + '" verknüpft.';
   render();
+}
+
+// Fehlende und knappe Zutaten eines Rezepts (für die gewählte Portionszahl) auf die Einkaufsliste.
+async function recipeToShopping(id){
+  const r = recipes.find(x => x.id === id);
+  if(!r) return;
+  const factor = viewPortions / (r.servings || 2);
+  const ev = evalRecipe(r, factor);
+  const needs = [...ev.missing, ...ev.short].map(row => {
+    let p;
+    if(row.status === 'knapp') p = partsFromBase(row.dim, row.short);
+    else {
+      const n = parseAmount(row.ing.amount);
+      p = n === null ? { amount: '', unit: '' } : metricParts(n * factor, row.ing.unit);
+    }
+    return { name: row.ing.name, amount: p.amount === '' ? '' : String(p.amount), unit: p.unit };
+  });
+  let added = 0;
+  shopping = await mutateShared('shopping', shopping, (list) => {
+    needs.forEach(nd => {
+      const listed = list.some(s => !s.checked && normKey(s.name) === normKey(nd.name));
+      if(!listed){ list.push({ id: uid(), name: nd.name, amount: nd.amount, unit: nd.unit, checked: false, source: 'rezept' }); added++; }
+    });
+    return list;
+  });
+  statusMsg = added ? added + ' Zutat' + (added === 1 ? '' : 'en') + ' auf die Einkaufsliste gesetzt.' : 'Alles steht schon auf der Einkaufsliste.';
+  activeTab = 'einkauf';
+  go('');
 }
 
 async function addShoppingItem(){
@@ -1242,28 +1434,20 @@ function bindGlobalEvents(){
         recipeFilterTags = recipeFilterTags.includes(t) ? recipeFilterTags.filter(x=>x!==t) : [...recipeFilterTags, t];
         render(); break;
       }
-      case 'toggle-draft-tag': {
-        const t = el.dataset.tag;
-        draftTags = draftTags.includes(t) ? draftTags.filter(x=>x!==t) : [...draftTags, t];
-        render(); break;
-      }
-      case 'add-draft-ing': draftIngredients.push({name:'',amount:'',unit:''}); render(); break;
-      case 'remove-draft-ing': draftIngredients.splice(parseInt(el.dataset.idx),1); render(); break;
-      case 'parse-paste': {
-        const raw = document.getElementById('paste-area').value;
-        const lines = raw.split('\n').map(l=>l.trim()).filter(Boolean);
-        if(lines.length === 0) break;
-        if(draftName.trim()){
-          // Name steht schon oben -> alle Zeilen als Zutaten behandeln, Name nicht überschreiben.
-          draftIngredients = lines.map(parseIngredientLine).filter(Boolean);
-        } else {
-          // Kein Name gesetzt -> erste Zeile ist der Gerichtsname, Rest sind Zutaten.
-          draftName = lines[0];
-          draftIngredients = lines.slice(1).map(parseIngredientLine).filter(Boolean);
-        }
-        render(); break;
-      }
-      case 'save-recipe': await saveRecipe(); break;
+      case 'set-cat-filter': recipeCatFilter = el.dataset.cat; recipeShown = 24; render(); break;
+      case 'recipes-more': recipeShown += 24; refreshRecipeList(); break;
+      case 'new-recipe': go('#/neu'); break;
+      case 'open-settings': go('#/einstellungen'); break;
+      case 'go-back': goBack(); break;
+      case 'edit-recipe': go('#/rezept/' + encodeURIComponent(el.dataset.id) + '/bearbeiten'); break;
+      case 'cook-recipe': go('#/rezept/' + encodeURIComponent(el.dataset.id) + '/kochen'); break;
+      case 'close-cook': goBack(); break;
+      case 'portions-inc': viewPortions += 1; render(); break;
+      case 'portions-dec': viewPortions = Math.max(1, viewPortions - 1); render(); break;
+      case 'cook-portions-inc': cookPortions += 1; render(); break;
+      case 'cook-portions-dec': cookPortions = Math.max(1, cookPortions - 1); render(); break;
+      case 'alias-open': aliasFor = parseInt(el.dataset.idx); render(); break;
+      case 'recipe-to-shopping': await recipeToShopping(el.dataset.id); break;
       case 'del-recipe': {
         if(!confirm('Dieses Rezept wirklich löschen?')) break;
         const id = el.dataset.id;
@@ -1272,10 +1456,63 @@ function bindGlobalEvents(){
           DAYS.forEach(d => { if(wp[d] === id) delete wp[d]; });
           return wp;
         });
+        go(''); break;
+      }
+      case 'edit-cancel': editing = null; goBack(); break;
+      case 'edit-save': await saveEdit(); break;
+      case 'edit-toggle-tag': {
+        const t = el.dataset.tag;
+        editing.tags = editing.tags.includes(t) ? editing.tags.filter(x => x !== t) : [...editing.tags, t];
         render(); break;
       }
-      case 'cook-recipe': openCookMode(el.dataset.id); break;
-      case 'close-cook': closeCookMode(); break;
+      case 'edit-ing-add': editing.ingredients.push({ name: '', amount: '', unit: '', note: '', approx: false }); render(); break;
+      case 'edit-ing-del': editing.ingredients.splice(parseInt(el.dataset.ing), 1); render(); break;
+      case 'edit-ing-paste': {
+        const ta = document.getElementById('edit-paste');
+        if(!ta) break;
+        ta.value.split('\n').map(l => l.trim()).filter(Boolean).map(parseIngredientLine).filter(Boolean).forEach(p => {
+          editing.ingredients.push({ name: p.name, amount: p.amount || '', unit: canonicalUnit(p.unit || ''), note: '', approx: false });
+        });
+        render(); break;
+      }
+      case 'edit-step-add': editing.steps.push(''); render(); break;
+      case 'edit-step-del': editing.steps.splice(parseInt(el.dataset.step), 1); render(); break;
+      case 'edit-step-up': case 'edit-step-down': {
+        const i = parseInt(el.dataset.step);
+        const j = action === 'edit-step-up' ? i - 1 : i + 1;
+        if(j >= 0 && j < editing.steps.length){
+          [editing.steps[i], editing.steps[j]] = [editing.steps[j], editing.steps[i]];
+          render();
+        }
+        break;
+      }
+      case 'save-staples': {
+        const list = document.getElementById('staples-input').value.split(/[,\n]/).map(s => s.trim()).filter(Boolean);
+        meta = await mutateShared('meta', meta, (m) => { m = m || {}; m.staples = list; return m; });
+        statusMsg = 'Grundvorrat gespeichert.';
+        render(); break;
+      }
+      case 'add-recipe-category': {
+        const name = document.getElementById('new-category-input').value.trim();
+        if(name){ await addRecipeCategory(name); render(); }
+        break;
+      }
+      case 'del-recipe-category': {
+        const c = el.dataset.cat;
+        meta = await mutateShared('meta', meta, (m) => { m = m || {}; m.recipeCategories = catsOf(m).filter(x => x !== c); return m; });
+        render(); break;
+      }
+      case 'del-alias': {
+        const k = el.dataset.key;
+        meta = await mutateShared('meta', meta, (m) => {
+          m = m || {};
+          const a = { ...(m.aliases || {}) }; const n = { ...(m.aliasNames || {}) };
+          delete a[k]; delete n[k];
+          m.aliases = a; m.aliasNames = n;
+          return m;
+        });
+        render(); break;
+      }
       case 'toggle-cook-ing': {
         const idx = parseInt(el.dataset.idx);
         cookChecked.has(idx) ? cookChecked.delete(idx) : cookChecked.add(idx);
@@ -1291,7 +1528,7 @@ function bindGlobalEvents(){
         const freeDay = DAYS.find(d => !weekplan[d]) || DAYS[0];
         weekplan = await mutateShared('weekplan', weekplan, (wp) => { wp[freeDay] = id; return wp; });
         activeTab = 'wochenplan';
-        render(); break;
+        go(''); break;
       }
       case 'clear-weekplan': {
         if(!confirm('Den Wochenplan wirklich leeren? (Rezepte und Vorräte bleiben erhalten)')) break;
@@ -1438,6 +1675,25 @@ function bindGlobalEvents(){
       }
       return;
     }
+    if(el.dataset.action === 'edit-category' && editing){
+      if(el.value === '__new'){
+        const name = (prompt('Name der neuen Kategorie?') || '').trim();
+        if(name){ await addRecipeCategory(name); editing.category = name; }
+        render();
+      } else {
+        editing.category = el.value;
+      }
+      return;
+    }
+    if(el.dataset.action === 'edit-ing-approx' && editing){
+      const ing = editing.ingredients[parseInt(el.dataset.ing)];
+      if(ing) ing.approx = el.checked;
+      return;
+    }
+    if(el.dataset.action === 'alias-pick'){
+      if(el.value) await saveAlias(parseInt(el.dataset.idx), el.value);
+      return;
+    }
     if(el.dataset.action === 'set-day-recipe'){
       const day = el.dataset.day;
       const val = el.value;
@@ -1467,31 +1723,23 @@ function bindGlobalEvents(){
     const el = e.target;
     if(el.id === 'inv-search'){ invSearch = el.value; refreshInvSearchView(); return; }
     if(el.id === 'bulk-add-text') bulkDraft = el.value;
-    if(el.id === 'new-recipe-name') draftName = el.value;
-    if(el.id === 'new-recipe-notes') draftNotes = el.value;
-    const action = el.dataset && el.dataset.action;
-    if(action && action.startsWith('draft-ing-')){
-      const idx = parseInt(el.dataset.idx);
-      const field = action === 'draft-ing-name' ? 'name' : action === 'draft-ing-amount' ? 'amount' : 'unit';
-      if(draftIngredients[idx]) draftIngredients[idx][field] = el.value;
+    if(el.id === 'recipe-search'){ recipeSearch = el.value; recipeShown = 24; refreshRecipeList(); return; }
+    if(editing){
+      // Editor: Eingaben direkt in den Entwurf schreiben, gerendert wird erst bei Knopfdruck.
+      if(el.dataset.f){ editing[el.dataset.f] = el.value; return; }
+      if(el.dataset.ing !== undefined && el.dataset.k){
+        const ing = editing.ingredients[parseInt(el.dataset.ing)];
+        if(ing) ing[el.dataset.k] = el.value;
+        return;
+      }
+      if(el.dataset.step !== undefined){ editing.steps[parseInt(el.dataset.step)] = el.value; return; }
     }
   });
 
-  // Manuell getippte Zutat beim Verlassen des Namensfeldes automatisch in Name/Menge/
-  // Einheit aufteilen (z. B. "200g Mehl"), sofern noch keine Menge gesetzt ist.
-  app.addEventListener('focusout', (e) => {
-    const el = e.target;
-    if(!el || el.dataset.action !== 'draft-ing-name') return;
-    const idx = parseInt(el.dataset.idx);
-    const ing = draftIngredients[idx];
-    if(!ing) return;
-    const before = ing.name + '|' + ing.amount + '|' + ing.unit;
-    const norm = normalizeIngredient(ing);
-    if((norm.name + '|' + norm.amount + '|' + norm.unit) !== before){
-      draftIngredients[idx] = norm;
-      render();
-    }
-  });
+  // Merkt, ob der KI-Bereich auf- oder zugeklappt ist (das Ereignis bubbelt nicht, daher capture).
+  app.addEventListener('toggle', (e) => {
+    if(e.target.classList && e.target.classList.contains('ai-details')) aiDetailsOpen = e.target.open;
+  }, true);
 
   document.addEventListener('change', (e) => {
     if(e.target && e.target.id === 'import-file'){
@@ -1506,6 +1754,11 @@ function bindGlobalEvents(){
     setTimeout(() => { if(pendingRender && !inputFocused()) render(); }, 150);
   });
 
+  window.addEventListener('hashchange', routeFromHash);
+  // Der Browser gibt die Display-Sperre beim App-Wechsel frei – im Kochmodus neu anfordern.
+  document.addEventListener('visibilitychange', () => {
+    if(document.visibilityState === 'visible' && cookingRecipeId) requestWakeLock();
+  });
   window.addEventListener('online', () => { online = true; scheduleRender(); });
   window.addEventListener('offline', () => { online = false; scheduleRender(); });
 }
@@ -1522,7 +1775,7 @@ async function boot(){
   if(storeMode() === 'lokal' && !ready){
     // Lokaler Modus liefert alle Keys synchron; falls Speicher leer war, sind wir trotzdem startklar.
     ready = true;
-    render();
+    routeFromHash();
   }
 }
 
