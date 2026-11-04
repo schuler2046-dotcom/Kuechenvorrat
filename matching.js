@@ -249,9 +249,16 @@ export function evaluateIngredient(ing, inventory, ctx = {}, factor = 1){
   }
 
   const staples = ctx.staples || DEFAULT_STAPLES;
-  const parts = name.split(/\s+und\s+|\s*,\s*/i);
-  if(parts.length > 1 && parts.every(p => isStaple(p, staples))){
-    return { status: 'grundvorrat', items: [], substitute: false };
+  // Gebündelte Zutaten ("Salz, Pfeffer", "Zwiebel und Knoblauch"): jede Zutat einzeln bewerten,
+  // das schlechteste Ergebnis zählt. Teile ohne Aussage ("fein gewürfelt") werden ignoriert.
+  const parts = name.split(/\s+und\s+|\s*,\s*/i).map(s => s.trim()).filter(p => normKey(p));
+  if(parts.length > 1){
+    if(parts.every(p => isStaple(p, staples))){
+      return { status: 'grundvorrat', items: [], substitute: false };
+    }
+    const results = parts.filter(p => !isStaple(p, staples))
+      .map(p => evaluateIngredient({ ...ing, name: p }, inventory, ctx, factor));
+    return results.reduce((worst, r) => RANK[r.status] > RANK[worst.status] ? r : worst);
   }
 
   const m = matchItems(name, inventory, ctx);
