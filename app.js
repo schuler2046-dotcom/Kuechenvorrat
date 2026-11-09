@@ -11,8 +11,8 @@ import { spokenToLines } from './voice.js';
 import { evaluateIngredient, evaluateRecipe, normKey, DEFAULT_STAPLES } from './matching.js';
 import { recipeCardHtml, recipeDetailHtml, editorHtml, cookSheetHtml } from './recipes-ui.js';
 import { planDeduction, defaultOn, applyDeduction, revertDeduction } from './cook.js';
-import { mergeNeeds, needsOfEvaluation } from './shopping.js';
-import { parseImportFile, normalizeIgRecipe, pickNew, makeBatch, nextBatch, planUndo, applyUndo, markUsed } from './ig-import.js';
+import { mergeNeeds, needsOfEvaluation, reconcilePlanNeeds } from './shopping.js';
+import { parseImportFile, normalizeIgRecipe, pickNew, pickImageUpdates, makeBatch, nextBatch, planUndo, applyUndo, markUsed } from './ig-import.js';
 import { resizeToDataUrl } from './images.js';
 import {
   parseAmount, canonicalUnit, isItemUnit, stepFor, formatQuantity, addAmounts,
@@ -113,8 +113,11 @@ function onStoreChange(key, value){
   if(!ready && DATA_KEYS.every(k => receivedKeys.has(k))){
     ready = true;
     routeFromHash();
+    schedulePlanSync();
     return;
   }
+  // Die Einkaufsliste selbst löst keinen Abgleich aus, sonst käme ein gelöschter Eintrag sofort zurück.
+  if(key !== 'shopping') schedulePlanSync();
   scheduleRender();
 }
 
@@ -1062,12 +1065,9 @@ function renderWochenplan(){
 
   const needs = plannedNeeds();
   const listedKeys = new Set(shopping.filter(s => !s.checked).map(s => normKey(s.name)));
-  const newNeeds = needs.filter(n => !listedKeys.has(normKey(n.name)));
   const missingHtml = needs.length
     ? `<ul class="shopping-list">${needs.map(n=>`<li><span class="shop-name">${escapeHtml(n.name)}${n.amount ? ' – ' + escapeHtml(formatQuantity(n.amount, n.unit)) : ''}</span>${listedKeys.has(normKey(n.name))?'<span class="shop-src">schon auf der Liste</span>':''}</li>`).join('')}</ul>
-       <div class="recipe-controls" style="margin-top:10px;">
-         <button class="btn small" data-action="missing-to-shopping" ${newNeeds.length===0?'disabled':''}>${newNeeds.length ? newNeeds.length + ' fehlende Zutaten auf die Einkaufsliste' : 'Alles schon auf der Einkaufsliste'}</button>
-       </div>`
+       <div class="status-line" style="margin-top:10px;">Diese Zutaten werden automatisch in den Einkauf übernommen und passen sich an, wenn du den Plan oder den Vorrat änderst.</div>`
     : '<div class="empty-note">Für die geplanten Gerichte ist alles da, oder es ist noch nichts geplant.</div>';
 
   return `
@@ -1091,6 +1091,38 @@ function plannedNeeds(){
   return mergeNeeds(planned.flatMap(r => needsOfEvaluation(evalRecipe(r), 1)));
 }
 
+// Fehlende Zutaten der geplanten Gerichte landen automatisch im Einkauf (source 'plan'). Der Abgleich
+// ändert nur offene Plan-Einträge; geschrieben wird nur bei einer echten Abweichung. Schlägt das
+// Speichern fehl, wird derselbe Stand nicht endlos wiederholt.
+let planSyncTimer = null;
+let planSyncBusy = false;
+let planSyncFailedSig = '';
+
+function schedulePlanSync(){
+  if(!ready) return;
+  clearTimeout(planSyncTimer);
+  planSyncTimer = setTimeout(syncPlanNeeds, 400);
+}
+
+async function syncPlanNeeds(){
+  if(!ready) return;
+  if(planSyncBusy){ schedulePlanSync(); return; }
+  evalCache.clear();
+  const needs = plannedNeeds();
+  if(!reconcilePlanNeeds(shopping, needs, uid).changed) return;
+  const sig = JSON.stringify(needs) + '|' + JSON.stringify(shopping);
+  if(sig === planSyncFailedSig) return;
+  planSyncBusy = true;
+  try{
+    const before = shopping;
+    shopping = await mutateShared('shopping', shopping, (list) => reconcilePlanNeeds(list, needs, uid).list);
+    planSyncFailedSig = shopping === before ? sig : '';
+  }finally{
+    planSyncBusy = false;
+  }
+  scheduleRender();
+}
+
 function renderEinkauf(){
   const open = shopping.filter(s => !s.checked);
   const done = shopping.filter(s => s.checked);
@@ -1109,7 +1141,7 @@ function renderEinkauf(){
   return `
     <div class="card">
       <h2>Einkaufsliste</h2>
-      <div class="status-line">Wird von beiden geteilt – abhaken geht auch im Laden. Fehlende Zutaten aus dem Wochenplan landen hier per Knopfdruck.</div>
+      <div class="status-line">Wird von beiden geteilt – abhaken geht auch im Laden. Fehlende Zutaten aus dem Wochenplan landen hier automatisch (Herkunft „Wochenplan“).</div>
       ${listHtml}
       <div class="add-row" style="margin-top:12px;">
         <input type="text" id="new-shop-name" placeholder="Artikel">
@@ -1279,9 +1311,10 @@ async function importInstagram(file){
     setIgStatus('Datei wird gelesen …');
     const items = parseImportFile(await file.text()).map(r => normalizeIgRecipe(r)).filter(Boolean);
     const { add, skipped } = pickNew(recipes, items);
-    if(!add.length){ setIgStatus('Nichts Neues: ' + skipped + ' Rezepte waren schon vorhanden.'); return; }
+    const imgUpd = pickImageUpdates(recipes, items);
+    if(!add.length && !imgUpd.length){ setIgStatus('Nichts Neues: ' + skipped + ' Rezepte waren schon vorhanden.'); return; }
     const size = new Blob([JSON.stringify([...recipes, ...add.map(a => a.recipe)])]).size;
-    if(size > 900 * 1024){
+    if(add.length && size > 900 * 1024){
       setIgStatus('Abgebrochen: Die Rezepte würden die Datenbank-Grenze (rund 1 MB) überschreiten. Nichts wurde geändert.');
       return;
     }
@@ -1295,10 +1328,20 @@ async function importInstagram(file){
       done++;
       setIgStatus('Bilder gespeichert: ' + done + ' von ' + add.length + ' …');
     }
+    // Bilder für schon vorhandene Rezepte ohne Bild: nur das Bild-Dokument und das Flag hasImage.
+    let imgDone = 0;
+    for(const u of imgUpd){
+      await writeKey('img-' + u.id, { dataUrl: u.imageData });
+      imageCache.set(u.id, u.imageData);
+      imgDone++;
+      setIgStatus('Bilder ergänzt: ' + imgDone + ' von ' + imgUpd.length + ' …');
+    }
+    const imgIds = new Set(imgUpd.map(u => u.id));
     let added = [];
     recipes = await mutateShared('recipes', recipes, (list) => {
       added = pickNew(list, add).add.map(it => it.recipe);
       added.forEach(r => list.push(r));
+      list.forEach(r => { if(imgIds.has(r.id) && !r.hasImage && !r.editedAt) r.hasImage = true; });
       return list;
     });
     if(added.length){
@@ -1309,7 +1352,8 @@ async function importInstagram(file){
         return m;
       });
     }
-    setIgStatus(added.length + ' neue Rezepte importiert, ' + skipped + ' waren schon vorhanden.');
+    setIgStatus(added.length + ' neue Rezepte importiert, ' + skipped + ' waren schon vorhanden.'
+      + (imgDone ? ' ' + imgDone + ' Bilder ergänzt (gehören nicht zum Rückgängig-Knopf).' : ''));
     if(settingsOpen) render();
   }catch(e){
     console.error(e);
@@ -1793,20 +1837,6 @@ function bindGlobalEvents(){
       case 'clear-weekplan': {
         if(!confirm('Den Wochenplan wirklich leeren? (Rezepte und Vorräte bleiben erhalten)')) break;
         weekplan = await mutateShared('weekplan', weekplan, () => ({}));
-        render(); break;
-      }
-      case 'missing-to-shopping': {
-        const needs = plannedNeeds();
-        shopping = await mutateShared('shopping', shopping, (list) => {
-          const listed = new Set(list.filter(s => !s.checked).map(s => normKey(s.name)));
-          needs.forEach(n => {
-            if(!listed.has(normKey(n.name))){
-              list.push({ id: uid(), name: n.name, amount: n.amount, unit: n.unit, checked: false, source: 'plan' });
-            }
-          });
-          return list;
-        });
-        activeTab = 'einkauf';
         render(); break;
       }
       case 'add-shop': await addShoppingItem(); break;

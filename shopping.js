@@ -46,3 +46,36 @@ export function mergeNeeds(list){
 export function needsOfEvaluation(ev, factor = 1){
   return [...ev.missing, ...ev.short].map(row => needFor(row, factor));
 }
+
+// Gleicht die automatisch aus dem Wochenplan abgeleiteten Einträge (source 'plan') mit dem aktuellen
+// Bedarf ab. Nur offene Plan-Einträge werden angelegt, angepasst oder entfernt. Eigene Einträge
+// (manuell, rezept) und abgehakte bleiben unberührt; ist ein Plan-Eintrag schon abgehakt, wird er nicht
+// noch einmal angelegt. newId erzeugt die ID für neue Einträge.
+export function reconcilePlanNeeds(list, needs, newId){
+  // Ein Bedarf kann dieselbe Zutat in zwei Einheiten haben (200 g Mehl + 1 Packung): Schlüssel = Name + Einheit.
+  const kn = (name, unit) => normKey(name) + '|' + (unit || '');
+  const wanted = new Map(needs.map(n => [kn(n.name, n.unit), n]));
+  const ownOpen = new Set(list.filter(s => !s.checked && s.source !== 'plan').map(s => normKey(s.name)));
+  const bought = new Set(list.filter(s => s.checked && s.source === 'plan').map(s => normKey(s.name)));
+  const seen = new Set();
+  const out = [];
+  let changed = false;
+  for(const s of list){
+    if(s.checked || s.source !== 'plan'){ out.push(s); continue; }
+    const k = kn(s.name, s.unit);
+    const nd = wanted.get(k);
+    if(!nd || ownOpen.has(normKey(s.name)) || seen.has(k)){ changed = true; continue; }
+    seen.add(k);
+    if(String(s.amount ?? '') !== nd.amount){
+      out.push({ ...s, amount: nd.amount });
+      changed = true;
+    } else out.push(s);
+  }
+  for(const [k, nd] of wanted){
+    const name = normKey(nd.name);
+    if(seen.has(k) || ownOpen.has(name) || bought.has(name)) continue;
+    out.push({ id: newId(), name: nd.name, amount: nd.amount, unit: nd.unit, checked: false, source: 'plan' });
+    changed = true;
+  }
+  return { list: out, changed };
+}

@@ -62,23 +62,45 @@ export function normalizeIgRecipe(raw, now = new Date().toISOString()){
   return { recipe, imageData: raw.imageData || null };
 }
 
-// Entscheidet, welche Einträge neu sind: gleiche igId, gleiche id oder (ohne igId) gleicher Name gelten als vorhanden.
+// Name für den Vergleich: klein, Leerzeichen zusammengefasst.
+const nameKey = (s) => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
+
+// Entscheidet, welche Einträge neu sind: gleiche igId, gleiche id oder gleicher Name gelten als
+// vorhanden, auch innerhalb der Datei selbst. So entstehen keine Doppelungen.
 export function pickNew(existing, incoming){
   const ids = new Set(existing.map(r => r.id));
   const igIds = new Set(existing.filter(r => r.igId).map(r => r.igId));
-  const names = new Set(existing.map(r => String(r.name || '').trim().toLowerCase()));
+  const names = new Set(existing.map(r => nameKey(r.name)));
   const add = [];
   let skipped = 0;
   for(const item of incoming){
     const r = item.recipe;
-    const dup = (r.igId && igIds.has(r.igId)) || (r.id && ids.has(r.id)) || (!r.igId && names.has(r.name.toLowerCase()));
+    const dup = (r.igId && igIds.has(r.igId)) || (r.id && ids.has(r.id)) || names.has(nameKey(r.name));
     if(dup){ skipped++; continue; }
     if(r.id) ids.add(r.id);
     if(r.igId) igIds.add(r.igId);
-    names.add(r.name.toLowerCase());
+    names.add(nameKey(r.name));
     add.push(item);
   }
   return { add, skipped };
+}
+
+// Bilder für bereits vorhandene Rezepte (gleiche igId oder id), die noch keins haben. Von Hand
+// bearbeitete Rezepte (editedAt) bleiben unberührt, damit ein bewusst entferntes Bild nicht zurückkommt.
+export function pickImageUpdates(existing, incoming){
+  const byIg = new Map(existing.filter(r => r.igId).map(r => [r.igId, r]));
+  const byId = new Map(existing.map(r => [r.id, r]));
+  const seen = new Set();
+  const out = [];
+  for(const item of incoming){
+    if(!item.imageData) continue;
+    const r = item.recipe;
+    const ex = (r.igId && byIg.get(r.igId)) || (r.id && byId.get(r.id));
+    if(!ex || ex.hasImage || ex.editedAt || seen.has(ex.id)) continue;
+    seen.add(ex.id);
+    out.push({ id: ex.id, imageData: item.imageData });
+  }
+  return out;
 }
 
 // ---------- Import rückgängig machen ----------

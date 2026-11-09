@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseImportFile, normalizeIgRecipe, pickNew } from '../ig-import.js';
+import { parseImportFile, normalizeIgRecipe, pickNew, pickImageUpdates } from '../ig-import.js';
 
 const raw = {
   id: 'DecETEMs4tK',
@@ -109,4 +109,26 @@ test('Rückgängig zweimal auf derselben Liste löscht nichts Weiteres', () => {
   const plan2 = planUndo(batch, once);
   assert.deepEqual(plan2.remove, []);
   assert.deepEqual(plan2.gone, ['ig-A']);
+});
+
+test('Bilder nachtragen: nur vorhandene Rezepte ohne Bild und ohne Handbearbeitung', () => {
+  const mk = (id, extra = {}) => ({ recipe: { id: 'ig-' + id, igId: id, name: id }, imageData: 'data:image/jpeg;base64,AAAA', ...extra });
+  const existing = [
+    { id: 'ig-A', igId: 'A', name: 'A' },
+    { id: 'ig-B', igId: 'B', name: 'B', hasImage: true },
+    { id: 'ig-C', igId: 'C', name: 'C', editedAt: '2026-11-06T10:00:00Z' },
+    { id: 'ig-D', igId: 'D', name: 'D' }
+  ];
+  const incoming = [mk('A'), mk('B'), mk('C'), mk('D', { imageData: null }), mk('E'), mk('A')];
+  assert.deepEqual(pickImageUpdates(existing, incoming), [{ id: 'ig-A', imageData: 'data:image/jpeg;base64,AAAA' }]);
+});
+
+test('Keine Doppelungen: gleicher Name unter anderer igId und doppelte Einträge in der Datei', () => {
+  const existing = [{ id: 'ig-A', igId: 'A', name: 'Linsen-Curry' }];
+  const same = normalizeIgRecipe({ id: 'B', title: '  linsen-curry ' });
+  const fresh1 = normalizeIgRecipe({ id: 'C', title: 'Gnocchi-Pfanne' });
+  const fresh2 = normalizeIgRecipe({ id: 'D', title: 'gnocchi-pfanne' });
+  const res = pickNew(existing, [same, fresh1, fresh2]);
+  assert.deepEqual(res.add.map(i => i.recipe.igId), ['C']);
+  assert.equal(res.skipped, 2);
 });
