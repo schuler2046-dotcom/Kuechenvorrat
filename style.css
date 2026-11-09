@@ -16,11 +16,22 @@
 }
 *{ box-sizing: border-box; }
 body{ margin:0; background: var(--bg); color: var(--ink); font-family: 'IBM Plex Sans', sans-serif; min-height: 100vh; }
-#app{ max-width: 980px; margin: 0 auto; padding: 28px 20px 80px; }
+#app{ max-width: 980px; margin: 0 auto; padding: calc(20px + env(safe-area-inset-top)) 20px 80px; }
 
 .app-header{ display:flex; align-items:flex-start; justify-content:space-between; margin-bottom: 10px; flex-wrap: wrap; gap: 8px; }
 .app-header h1{ font-family:'Fraunces', serif; font-weight:700; font-size: 30px; color: var(--surface); margin:0; letter-spacing: 0.2px; }
 .app-header p{ margin:2px 0 0; color: #B9C4B4; font-size: 13px; }
+
+/* Kopf- und Aktionsleisten bleiben oben stehen. Auf dem iPhone (black-translucent)
+   liegen sie unter der Statusleiste: Hintergrund und Abstand reichen bis zum Rand. */
+.app-header, .cook-head, .detail-bar{
+  position: sticky; top: 0; z-index: 20;
+  margin-top: calc(-1 * env(safe-area-inset-top));
+  padding-top: env(safe-area-inset-top);
+  background: var(--bg);
+  box-shadow: 0 0 0 100vmax var(--bg);
+  clip-path: inset(0 -100vmax);
+}
 .sync-row{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
 .sync-time{ color:#9DB194; font-size:12px; }
 .sync-dot{ display:inline-block; width:8px; height:8px; border-radius:50%; background:#5B7A52; margin-right:4px; }
@@ -180,7 +191,7 @@ button.btn:disabled{ opacity:.55; cursor:default; }
 @media (max-width: 560px){
   nav.tabs button{ padding: 8px 10px; font-size:13px; }
   .app-header h1{ font-size:24px; }
-  #app{ padding: 20px 12px 70px; }
+  #app{ padding: calc(20px + env(safe-area-inset-top)) 12px 70px; }
 }
 
 /* Einheiten-Auswahl, Packungsgröße */
