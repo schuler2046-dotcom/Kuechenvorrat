@@ -1,6 +1,6 @@
 // Service Worker: cached nur App-Code und Assets, NIE Nutzdaten.
 // Bei jeder Änderung an den App-Dateien die Cache-Version hochzählen!
-const CACHE = 'vorrat-v19';
+const CACHE = 'vorrat-v20';
 
 const PRECACHE = [
   './',
@@ -20,6 +20,7 @@ const PRECACHE = [
   './voice.js',
   './recipes-ui.js',
   './ig-import.js',
+  './inbox.js',
   './images.js',
   './firebase-config.js',
   './manifest.json',

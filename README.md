@@ -13,7 +13,7 @@ Installierbare PWA (vanilla HTML/CSS/JS, kein Build-Step), Echtzeit-Sync über F
 - **Kochmodus** mit Display-an und Portionsrechner. Am Ende **„Gekocht – Zutaten abbuchen“**: zeigt je Zutat, was aus dem Vorrat abgezogen wird, ein Klick bucht ab, Rückgängig möglich.
 - **Wochenplan**: Gericht pro Wochentag, zwischen Tagen tauschbar („Tauschen mit …“), „Rezept öffnen“ führt direkt zum Rezept. Fehlende Zutaten mit Fehlmenge landen automatisch auf der Einkaufsliste (Herkunft „Wochenplan“). Der Abgleich ändert nur offene Plan-Einträge; eigene und abgehakte Einträge bleiben unberührt.
 - **Einkauf**: geteilte Einkaufsliste, abhakbar, Abgehaktes wandert (einheitenbewusst) in den Vorrat.
-- **Instagram-Import**: Einstellungen → „Instagram-Rezepte importieren“ spielt die Datei aus der Instagram-Sync ein (additiv, Titelbilder privat in Firestore). Vorhandene Rezepte ohne Bild bekommen beim erneuten Import das Bild aus der Datei; Rezepte mit Bild oder von Hand bearbeitete bleiben unberührt.
+- **Neue Rezepte ohne Dateien**: Im Reiter Rezepte den Instagram-Link unter „Link für Claude“ merken (oder im Chat „Rezept hinzufügen <Link>“ schreiben). Claude liest den Beitrag und trägt Rezept samt Titelbild direkt in Firestore ein (`tools/vorrat.mjs`, Skill `rezept-hinzufuegen`), ohne Doppelungen und ohne den Vorrat anzufassen. Einstellungen → „Instagram-Rezepte“ macht den letzten Import rückgängig.
 - **Sync**: Änderungen erscheinen sofort auf allen Geräten (Firestore `onSnapshot`), offline nutzbar mit automatischem Abgleich.
 - **Datensicherung**: JSON-Export/-Import in den Einstellungen (Titelbilder sind nicht enthalten).
 
@@ -28,10 +28,14 @@ Vanilla JS als ES-Module, kein Build-Step.
 | `matching.js` | Begriffsabgleich und Mengenprüfung Zutat ↔ Vorrat (rein) |
 | `cook.js` | Abbuchungsplan für „Gekocht“ (rein) |
 | `shopping.js` | Einkaufsbedarf aus Rezept-Bewertungen (rein) |
-| `ig-import.js` | Import-Datei der Instagram-Sync umwandeln (rein) |
+| `ig-import.js` | Instagram-Rezepte umwandeln, Doppelungen erkennen, Import-Chargen (rein) |
+| `inbox.js` | Warteliste für Rezept-Links (rein) |
+| `weekplan.js`, `tools/` | Tauschen im Wochenplan (rein); Werkzeug für Claude (`vorrat.mjs`, `vorrat-core.mjs`, `firestore-node.mjs`, `bild.py`) |
 | `recipes-ui.js` | HTML-Bausteine für Karten, Detail, Editor, Abbuchen-Seite |
 | `store.js` | Firestore bzw. lokaler Speicher, `readKey`/`writeKey` für einzelne Dokumente (Bilder) |
 | `parse.js`, `ai.js`, `voice.js`, `images.js`, `constants.js`, `util.js` | Parser, KI-Prompts, Sprache, Bildverkleinerung, Konstanten |
+
+Dokumente pro Haushalt: `inventory`, `recipes`, `weekplan`, `shopping`, `meta`, `inbox` (Warteliste der Rezept-Links) und `img-<rezeptId>`.
 
 Erweiterte Datenfelder (alle optional, Schema nur additiv): Vorratsartikel `packSize`/`packUnit`; Rezepte `servings`, `category`, `source`, `igId`, `sourceUrl`, `author`, `status`, `hasImage`, Zutat `note`/`approx`; `meta`: `staples`, `aliases`, `aliasNames`, `packSizes`, `recipeCategories`, `cookLog`, `undo`. Titelbilder liegen als Dokument `data/img-<rezeptId>` (`{json: {dataUrl}}`).
 
@@ -51,7 +55,7 @@ Führt die Unit-Tests der reinen Module (`tests/*.test.js`) mit dem eingebauten 
 4. Schreibvorgänge sind Read-before-write (Firestore-Transaktionen) pro Dokument.
 5. JSON-Export/-Import als Sicherheitsnetz; Import ist rein additiv und löscht nie.
 
-**Bei jedem Update der App-Dateien: `CACHE`-Version in `sw.js` hochzählen** (`vorrat-vN` (aktuell v16)),
+**Bei jedem Update der App-Dateien: `CACHE`-Version in `sw.js` hochzählen** (`vorrat-vN` (aktuell v20)),
 sonst liefern installierte Home-Screen-Apps die alte Version aus.
 
 ## Firebase einrichten (einmalig, ~10 Minuten)

@@ -10,7 +10,7 @@
 // unter households/{haushaltsCode}/data/{key} — dadurch ist das Schema der Nutzdaten
 // vollständig von Firestore entkoppelt und bleibt identisch zum bisherigen Artifact.
 
-export const DATA_KEYS = ['inventory', 'recipes', 'weekplan', 'shopping', 'meta'];
+export const DATA_KEYS = ['inventory', 'recipes', 'weekplan', 'shopping', 'meta', 'inbox'];
 
 const LOCAL_PREFIX = 'vorrat-';
 

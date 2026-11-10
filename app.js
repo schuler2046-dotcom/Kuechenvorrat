@@ -13,7 +13,8 @@ import { recipeCardHtml, recipeDetailHtml, editorHtml, cookSheetHtml } from './r
 import { planDeduction, defaultOn, applyDeduction, revertDeduction } from './cook.js';
 import { mergeNeeds, needsOfEvaluation, reconcilePlanNeeds } from './shopping.js';
 import { swapDays } from './weekplan.js';
-import { parseImportFile, normalizeIgRecipe, pickNew, pickImageUpdates, makeBatch, nextBatch, planUndo, applyUndo, markUsed } from './ig-import.js';
+import { nextBatch, planUndo, applyUndo, markUsed } from './ig-import.js';
+import { addInboxLink, removeInboxEntry, visibleInbox } from './inbox.js';
 import { resizeToDataUrl } from './images.js';
 import {
   parseAmount, canonicalUnit, isItemUnit, stepFor, formatQuantity, addAmounts,
@@ -29,6 +30,8 @@ let recipes = [];
 let weekplan = {};
 let shopping = [];
 let meta = {};
+let inbox = [];
+let inboxMsg = '', inboxDraft = '';
 let activeTab = 'vorrat';
 let recipeFilterTags = [];
 let ready = false;
@@ -109,6 +112,7 @@ function onStoreChange(key, value){
   if(key === 'weekplan' && value !== null) weekplan = value;
   if(key === 'shopping' && value !== null) shopping = value;
   if(key === 'meta' && value !== null) meta = value;
+  if(key === 'inbox' && value !== null) inbox = value;
   receivedKeys.add(key);
   lastSync = new Date();
   if(!ready && DATA_KEYS.every(k => receivedKeys.has(k))){
@@ -581,10 +585,8 @@ function renderSettings(){
         ${aliasRows ? `<ul class="shopping-list">${aliasRows}</ul>` : '<div class="empty-note">Noch keine Zuordnungen.</div>'}
       </div>
       <div class="card">
-        <h2>Instagram-Rezepte importieren</h2>
-        <div class="status-line">Datei aus der Instagram-Sync einspielen. Schon vorhandene Rezepte – auch von Hand geänderte – bleiben unverändert, es kommt nur Neues dazu.</div>
-        <div class="recipe-controls"><button class="btn small" data-action="ig-import">Datei auswählen</button></div>
-        <input type="file" id="ig-file" accept="application/json,.json" style="display:none;">
+        <h2>Instagram-Rezepte</h2>
+        <div class="status-line">Neue Rezepte kommen über „Link für Claude“ im Reiter Rezepte oder per Chat. Hier lässt sich der letzte Import rückgängig machen.</div>
         <div class="status-line" id="ig-status">${escapeHtml(igStatus)}</div>
         ${igUndoBoxHtml()}
       </div>
@@ -954,6 +956,51 @@ function refreshRecipeList(){
   if(info) info.textContent = recipeCountText();
 }
 
+const INBOX_MSG = {
+  neu: 'Gemerkt. Claude trägt das Rezept beim nächsten Durchlauf ein.',
+  doppelt: 'Dieser Link wartet schon auf Claude.',
+  ungueltig: 'Das ist kein Link zu einem Instagram-Beitrag.',
+  vorhanden: 'Dieses Rezept gibt es schon.'
+};
+
+async function addInbox(){
+  const input = document.getElementById('inbox-input');
+  const text = input ? input.value : '';
+  let res = null;
+  inbox = await mutateShared('inbox', inbox, (list) => {
+    res = addInboxLink(list, recipes, text, uid);
+    return res.inbox;
+  });
+  inboxMsg = res ? (INBOX_MSG[res.status] || '') : '';
+  inboxDraft = res && res.status === 'neu' ? '' : text;
+  render();
+}
+
+function inboxEntryHtml(e){
+  const rec = e.recipeId && recipes.find(r => r.id === e.recipeId);
+  const state = e.status === 'erledigt' ? '✔ ' + (rec ? escapeHtml(rec.name) : 'Rezept hinzugefügt')
+    : e.status === 'fehler' ? '⚠ ' + escapeHtml(e.meldung || 'Konnte nicht gelesen werden') : 'wartet auf Claude';
+  const open = rec ? `<a class="btn small" href="#/rezept/${encodeURIComponent(rec.id)}">Rezept öffnen</a>` : '';
+  return `<li class="inbox-item inbox-${e.status}">
+    <span class="inbox-text"><span class="inbox-code">${escapeHtml(e.shortcode)}</span> ${state}</span>
+    ${open}<button class="btn small secondary" data-action="inbox-remove" data-id="${escapeHtml(e.id)}" title="Entfernen">×</button>
+  </li>`;
+}
+
+function inboxCardHtml(){
+  const items = visibleInbox(inbox);
+  return `<div class="card">
+    <h2>Link für Claude</h2>
+    <div class="status-line">Instagram-Link einfügen. Claude liest das Rezept und trägt es hier ein, ohne Dateien.</div>
+    <div class="add-row">
+      <input type="text" inputmode="url" id="inbox-input" placeholder="https://www.instagram.com/p/…" value="${escapeHtml(inboxDraft)}" autocomplete="off">
+      <button class="btn small" data-action="inbox-add">Merken</button>
+    </div>
+    ${inboxMsg ? `<div class="status-line">${escapeHtml(inboxMsg)}</div>` : ''}
+    ${items.length ? `<ul class="inbox-list">${items.map(inboxEntryHtml).join('')}</ul>` : ''}
+  </div>`;
+}
+
 function renderRezepte(){
   const chip = (key, label) => `<span class="tag-chip ${recipeCatFilter === key ? 'selected' : ''}" data-action="set-cat-filter" data-cat="${escapeHtml(key)}">${escapeHtml(label)}</span>`;
   const tagChips = TAGS.map(t => `
@@ -961,6 +1008,7 @@ function renderRezepte(){
   `).join('');
   const aiOpen = aiDetailsOpen || aiPasteOpen || aiSuggestions || aiError;
   return `
+    ${inboxCardHtml()}
     <div class="card">
       <div class="head-row"><h2>Rezepte</h2><button class="btn small" data-action="new-recipe">+ Neu</button></div>
       <div class="search-row">
@@ -1304,73 +1352,11 @@ function igUndoBoxHtml(){
   return `<div id="ig-undo-box" class="undo-box"><div class="status-line">${head}</div>
     <p class="undo-warn"><strong>${plan.remove.length} Rezepte werden gelöscht</strong>, samt Titelbildern.
     ${plan.edited.length ? `${plan.edited.length} davon hast du bearbeitet, sie bleiben erhalten. ` : ''}
-    ${plan.gone.length ? `${plan.gone.length} gibt es nicht mehr. ` : ''}Das lässt sich nicht zurücknehmen; der Import selbst kann danach erneut eingespielt werden.</p>
+    ${plan.gone.length ? `${plan.gone.length} gibt es nicht mehr. ` : ''}Das lässt sich nicht zurücknehmen; Claude kann sie danach erneut hinzufügen.</p>
     <div class="recipe-controls">
       <button class="btn small danger" data-action="ig-undo-do" ${plan.remove.length ? '' : 'disabled'}>Endgültig rückgängig machen</button>
       <button class="btn small secondary" data-action="ig-undo-cancel">Abbrechen</button>
     </div></div>`;
-}
-
-function setIgStatus(msg){
-  igStatus = msg;
-  const el = document.getElementById('ig-status');
-  if(el) el.textContent = msg;
-}
-
-// Spielt die Sync-Datei ein: Bilder zuerst (eigene Dokumente), dann alle neuen Rezepte in einer Transaktion.
-async function importInstagram(file){
-  try{
-    setIgStatus('Datei wird gelesen …');
-    const items = parseImportFile(await file.text()).map(r => normalizeIgRecipe(r)).filter(Boolean);
-    const { add, skipped } = pickNew(recipes, items);
-    const imgUpd = pickImageUpdates(recipes, items);
-    if(!add.length && !imgUpd.length){ setIgStatus('Nichts Neues: ' + skipped + ' Rezepte waren schon vorhanden.'); return; }
-    const size = new Blob([JSON.stringify([...recipes, ...add.map(a => a.recipe)])]).size;
-    if(add.length && size > 900 * 1024){
-      setIgStatus('Abgebrochen: Die Rezepte würden die Datenbank-Grenze (rund 1 MB) überschreiten. Nichts wurde geändert.');
-      return;
-    }
-    let done = 0;
-    for(const it of add){
-      if(!it.recipe.id) it.recipe.id = uid();
-      if(it.imageData){
-        await writeKey('img-' + it.recipe.id, { dataUrl: it.imageData });
-        imageCache.set(it.recipe.id, it.imageData);
-      }
-      done++;
-      setIgStatus('Bilder gespeichert: ' + done + ' von ' + add.length + ' …');
-    }
-    // Bilder für schon vorhandene Rezepte ohne Bild: nur das Bild-Dokument und das Flag hasImage.
-    let imgDone = 0;
-    for(const u of imgUpd){
-      await writeKey('img-' + u.id, { dataUrl: u.imageData });
-      imageCache.set(u.id, u.imageData);
-      imgDone++;
-      setIgStatus('Bilder ergänzt: ' + imgDone + ' von ' + imgUpd.length + ' …');
-    }
-    const imgIds = new Set(imgUpd.map(u => u.id));
-    let added = [];
-    recipes = await mutateShared('recipes', recipes, (list) => {
-      added = pickNew(list, add).add.map(it => it.recipe);
-      added.forEach(r => list.push(r));
-      list.forEach(r => { if(imgIds.has(r.id) && !r.hasImage && !r.editedAt) r.hasImage = true; });
-      return list;
-    });
-    if(added.length){
-      const batch = makeBatch(added);
-      meta = await mutateShared('meta', meta, (m) => {
-        m = m || {};
-        m.igBatches = [batch, ...(m.igBatches || [])].slice(0, 5);
-        return m;
-      });
-    }
-    setIgStatus(added.length + ' neue Rezepte importiert, ' + skipped + ' waren schon vorhanden.'
-      + (imgDone ? ' ' + imgDone + ' Bilder ergänzt (gehören nicht zum Rückgängig-Knopf).' : ''));
-    if(settingsOpen) render();
-  }catch(e){
-    console.error(e);
-    setIgStatus('Import fehlgeschlagen: ' + e.message);
-  }
 }
 
 function catsOf(m){
@@ -1752,7 +1738,8 @@ function bindGlobalEvents(){
       case 'sheet-portions-dec': cookSheet.portions = Math.max(1, cookSheet.portions - 1); render(); break;
       case 'sheet-confirm': await confirmCook(); break;
       case 'undo-cook': await undoCook(); break;
-      case 'ig-import': document.getElementById('ig-file').click(); break;
+      case 'inbox-add': await addInbox(); break;
+      case 'inbox-remove': inbox = await mutateShared('inbox', inbox, (l) => removeInboxEntry(l, el.dataset.id)); render(); break;
       case 'ig-undo-ask': igUndoConfirm = true; render(); break;
       case 'ig-undo-cancel': igUndoConfirm = false; render(); break;
       case 'ig-undo-do': await undoInstagramImport(); break;
@@ -2071,12 +2058,6 @@ function bindGlobalEvents(){
   }, true);
 
   document.addEventListener('change', (e) => {
-    if(e.target && e.target.id === 'ig-file'){
-      const file = e.target.files && e.target.files[0];
-      if(file) importInstagram(file);
-      e.target.value = '';
-      return;
-    }
     if(e.target && e.target.id === 'import-file'){
       const file = e.target.files && e.target.files[0];
       if(file) importJson(file);

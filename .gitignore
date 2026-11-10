@@ -1,3 +1,5 @@
 node_modules/
 out/
 _tmp/
+backups/
+tools/haushalt.txt
