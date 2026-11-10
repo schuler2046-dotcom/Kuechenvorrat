@@ -95,7 +95,7 @@ const commands = {
   async status(db){
     const [rec, inv, inbox] = await Promise.all([db.read('recipes', []), db.read('inventory', []), db.read('inbox', [])]);
     const size = JSON.stringify(rec).length;
-    console.log(`Haushalt ${db.household}: ${rec.length} Rezepte (${Math.round(size / 1024)} KB von 1024 KB), `
+    console.log(`Haushalt: ${rec.length} Rezepte (${Math.round(size / 1024)} KB von 1024 KB), `
       + `${inv.length} Vorratsartikel, ${openInbox(inbox).length} offene Links.`);
   },
 
