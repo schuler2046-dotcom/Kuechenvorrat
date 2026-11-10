@@ -12,6 +12,7 @@ import { evaluateIngredient, evaluateRecipe, normKey, DEFAULT_STAPLES } from './
 import { recipeCardHtml, recipeDetailHtml, editorHtml, cookSheetHtml } from './recipes-ui.js';
 import { planDeduction, defaultOn, applyDeduction, revertDeduction } from './cook.js';
 import { mergeNeeds, needsOfEvaluation, reconcilePlanNeeds } from './shopping.js';
+import { swapDays } from './weekplan.js';
 import { parseImportFile, normalizeIgRecipe, pickNew, pickImageUpdates, makeBatch, nextBatch, planUndo, applyUndo, markUsed } from './ig-import.js';
 import { resizeToDataUrl } from './images.js';
 import {
@@ -1049,15 +1050,26 @@ function renderWochenplan(){
         ? `<div class="status-line" style="margin-top:6px;">Fehlt noch: ${lacking.map(n => escapeHtml(n)).join(', ')}</div>`
         : `<div class="status-line" style="margin-top:6px; color:#5B7A52;">Alles vorrätig</div>`;
     }
+    const swapOptions = DAYS.filter(d => d !== day).map(d => {
+      const other = recipes.find(r => r.id === weekplan[d]);
+      return `<option value="${d}">${d} (${other ? escapeHtml(other.name) : 'frei'})</option>`;
+    }).join('');
+    const actions = recipe
+      ? `<div class="day-actions">
+           <a class="btn small" href="#/rezept/${encodeURIComponent(recipe.id)}">Rezept öffnen</a>
+           <select data-action="swap-day" data-day="${day}"><option value="">Tauschen mit …</option>${swapOptions}</select>
+         </div>`
+      : (recipeId ? '<div class="status-line" style="margin-top:6px;">Das hinterlegte Rezept gibt es nicht mehr.</div>' : '');
     return `
       <div class="day-block">
         <div class="day-head">
           <span class="day-name">${day}</span>
-          <select data-action="set-day-recipe" data-day="${day}">
-            <option value="">(kein Gericht)</option>
-            ${options}
-          </select>
         </div>
+        <select class="day-pick" data-action="set-day-recipe" data-day="${day}">
+          <option value="">(kein Gericht)</option>
+          ${options}
+        </select>
+        ${actions}
         ${inner}
       </div>
     `;
@@ -2008,6 +2020,13 @@ function bindGlobalEvents(){
       const day = el.dataset.day;
       const val = el.value;
       weekplan = await mutateShared('weekplan', weekplan, (wp) => { if(val) wp[day]=val; else delete wp[day]; return wp; });
+      render();
+    }
+    if(el.dataset.action === 'swap-day'){
+      const from = el.dataset.day;
+      const to = el.value;
+      if(!to) return;
+      weekplan = await mutateShared('weekplan', weekplan, (wp) => swapDays(wp, from, to));
       render();
     }
     if(el.dataset.action === 'toggle-shop'){

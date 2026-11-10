@@ -125,9 +125,13 @@ button.btn:disabled{ opacity:.55; cursor:default; }
 .paste-box{ background:var(--surface-alt); border-radius:10px; padding:10px 12px; }
 .paste-hint{ font-size:12px; color:var(--ink-soft); margin: 4px 0 8px; }
 
-.day-block{ background: var(--surface-alt); border-radius:12px; padding:12px 14px; margin-bottom:10px; }
+.day-block{ background: var(--surface-alt); border-radius:12px; padding:12px 14px; margin-bottom:10px; min-width:0; }
 .day-head{ display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; }
 .day-name{ font-family:'Fraunces', serif; font-weight:600; font-size:15px; min-width:80px; }
+/* Gericht-Auswahl und Aktionen je Tag: volle Breite des Tagesblocks, nie darüber hinaus. */
+.day-pick{ display:block; width:100%; max-width:100%; min-width:0; margin-top:8px; text-overflow:ellipsis; }
+.day-actions{ display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-top:8px; }
+.day-actions select{ flex:1 1 160px; width:auto; max-width:100%; min-width:0; }
 .shopping-list{ list-style:none; padding:0; margin:0; }
 .shopping-list li{ display:flex; align-items:center; gap:8px; padding:7px 0; font-size:14px; border-bottom:1px dashed var(--divider); }
 .shopping-list li:last-child{ border-bottom:none; }
