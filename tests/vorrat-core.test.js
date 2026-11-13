@@ -2,8 +2,14 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   normalizeAll, addRecipes, patchRecipe, removeRecipe, findRecipes,
-  openInbox, markInbox, backupsToDelete, backupName
+  openInbox, markInbox, backupsToDelete, backupName, normalizeHousehold
 } from '../tools/vorrat-core.mjs';
+
+test('Werkzeug: Haushalts-Code wie in der App (klein, ohne Rand, Leerzeichen zu Bindestrich)', () => {
+  assert.equal(normalizeHousehold('  MeinHaus\n'), 'meinhaus');
+  assert.equal(normalizeHousehold('Unser Haus/2'), 'unser-haus-2');
+  assert.equal(normalizeHousehold('test-zusammenfuehrung'), 'test-zusammenfuehrung');
+});
 
 const raw = (igId, title, extra = {}) => ({
   igId, title, category: 'deftig',

@@ -66,3 +66,9 @@ export function backupsToDelete(names, keep = 20){
 export function backupName(date = new Date()){
   return date.toISOString().replace(/[:.]/g, '-');
 }
+
+// Haushalts-Code genau wie die App beim Speichern (app.js, save-household): sonst landet
+// das Werkzeug in einem anderen Firestore-Pfad als das Handy (Pfade unterscheiden Groß/klein).
+export function normalizeHousehold(code){
+  return String(code || '').trim().replace(/[\/\s]+/g, '-').toLowerCase();
+}

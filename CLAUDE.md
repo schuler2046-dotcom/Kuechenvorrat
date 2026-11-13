@@ -5,7 +5,7 @@ PWA (vanilla JS, kein Build) auf GitHub Pages, Daten in Firestore. Aufbau und Fu
 ## Daten ändern: direkt, ohne Dateien
 Rezepte, Vorrat, Einkauf und Plan werden mit `node tools/vorrat.mjs <befehl>` direkt in Firestore geändert. Der Nutzer erzeugt, exportiert und importiert keine Dateien.
 
-- Haushalt: `tools/haushalt.txt` (gitignored, vom Nutzer angelegt). Zum Testen immer `--haushalt test-zusammenfuehrung`. Den Code des echten Haushalts nie ausgeben, loggen oder committen.
+- Haushalt: `tools/haushalt.txt` (gitignored, vom Nutzer angelegt). Zum Testen immer `--haushalt test-zusammenfuehrung`. Den Code des echten Haushalts nie ausgeben, loggen oder committen. Das Werkzeug schreibt den Code wie die App klein (`normalizeHousehold`), Firestore-Pfade unterscheiden Groß/klein.
 - Vor jedem Schreiben legt das Werkzeug eine Sicherung in `backups/` an (gitignored, die letzten 20 bleiben).
 - Befehle: `status`, `rezept-neu <datei|-> [--bild <jpg> | --bild-url <url>]`, `rezept <text|id>`, `rezept-aendern <id> <patch.json>`, `rezept-loeschen <id>`, `lesen <key>`, `schreiben <key> <datei> [--stand <ms>]`, `eingang`, `eingang-erledigt <id> <rezeptId>`, `eingang-fehler <id> <text>`, `ordner-einspielen <ordner> [--trocken]`.
 - `rezept-loeschen` und `schreiben` auf `inventory`, `shopping`, `weekplan` nur nach ausdrücklichem Ok des Nutzers im Chat. Rezepte hinzufügen und Warteliste abarbeiten braucht kein Extra-Ok.

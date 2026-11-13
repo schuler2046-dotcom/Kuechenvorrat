@@ -13,7 +13,7 @@ import { connect } from './firestore-node.mjs';
 import { makeBatch } from '../ig-import.js';
 import {
   normalizeAll, addRecipes, patchRecipe, removeRecipe, findRecipes,
-  openInbox, markInbox, backupsToDelete, backupName
+  openInbox, markInbox, backupsToDelete, backupName, normalizeHousehold
 } from './vorrat-core.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -33,7 +33,7 @@ function household(opt){
   const code = opt.haushalt || process.env.VORRAT_HAUSHALT
     || (existsSync(join(ROOT, 'tools', 'haushalt.txt')) ? readFileSync(join(ROOT, 'tools', 'haushalt.txt'), 'utf8').trim() : '');
   if(!code || code === true) throw new Error('Kein Haushalt: tools/haushalt.txt anlegen oder --haushalt angeben.');
-  return code;
+  return normalizeHousehold(code);
 }
 
 function readInput(src){
